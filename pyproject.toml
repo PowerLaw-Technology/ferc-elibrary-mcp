@@ -1,0 +1,37 @@
+[project]
+name = "ferc-elibrary-mcp"
+version = "0.1.0"
+description = "Claude Desktop MCP server for searching and downloading public FERC eLibrary filings."
+readme = "README.md"
+authors = [
+    { name = "zoschin", email = "zachoschin@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=3.4.7",
+    "httpx>=0.28.1",
+    "pydantic>=2.13.4",
+]
+
+[project.scripts]
+ferc-elibrary-mcp = "ferc_elibrary_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-httpx>=0.36.2",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "live: hits the public FERC eLibrary API (deselected by default)",
+]
+addopts = ["-m", "not live"]
+
