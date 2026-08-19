@@ -15,6 +15,7 @@ from ferc_elibrary_mcp.client import (
     resolve_date_range,
     split_docket_number,
 )
+from ferc_elibrary_mcp import config
 from ferc_elibrary_mcp.config import BASE_URL
 from ferc_elibrary_mcp.exceptions import (
     ELibraryRequestError,
@@ -23,8 +24,12 @@ from ferc_elibrary_mcp.exceptions import (
 )
 from ferc_elibrary_mcp.models import FileSummary, detect_nonpublic_counterpart
 from tests.fixtures import (
+    CROSS_DOCKETED_SHEET,
+    EMPTY_SEARCH,
     SAMPLE_DOCKET_SHEET,
     SAMPLE_SEARCH,
+    docket_sheet,
+    docket_sheet_row,
     search_with_dockets,
     search_with_files,
 )
@@ -189,6 +194,7 @@ def test_date_envelope_shape():
         "date_range_source": "none",
         "date_field_applied": "filed",
         "results_may_be_date_limited": False,
+        "date_field_filtered_client_side": False,
     }
 
 
@@ -305,6 +311,160 @@ async def test_get_filing_no_counterpart_on_ordinary_filing(
     filing = await client.get_filing("20201119-5202")
     assert filing.has_nonpublic_counterpart is False
     assert filing.nonpublic_counterpart_basis is None
+
+
+async def test_docket_sheet_dedupes_associations(httpx_mock: HTTPXMock, client):
+    """FERC counts docket associations; callers want filings."""
+    httpx_mock.add_response(url=DOCKET_URL, json=CROSS_DOCKETED_SHEET)
+    sheet = await client.get_docket("EL25-49", limit=100)
+    assert sheet.total_hits == 2
+    assert sheet.count_basis == "distinct_accession"
+    assert len(sheet.filings) == 2
+    assert len({f.accession_number for f in sheet.filings}) == 2
+
+
+async def test_docket_sheet_merges_full_docket_array(httpx_mock: HTTPXMock, client):
+    httpx_mock.add_response(url=DOCKET_URL, json=CROSS_DOCKETED_SHEET)
+    sheet = await client.get_docket("EL25-49", limit=100)
+    row = next(f for f in sheet.filings if f.accession_number == "20260219-5002")
+    assert row.docket_numbers == ["EL25-49-000", "EL25-49-001", "EL25-49-002"]
+    assert row.sub_dockets == ["000", "001", "002"]
+    assert sheet.includes_subdockets == ["000", "001", "002"]
+
+
+async def test_docket_sheet_total_matches_retrievable_rows(
+    httpx_mock: HTTPXMock, client
+):
+    httpx_mock.add_response(url=DOCKET_URL, json=CROSS_DOCKETED_SHEET, is_reusable=True)
+    collected: set[str] = set()
+    page = 1
+    while page <= 5:
+        sheet = await client.get_docket("EL25-49", limit=1, page=page)
+        if not sheet.filings:
+            break
+        collected |= {f.accession_number for f in sheet.filings}
+        page += 1
+    first = await client.get_docket("EL25-49", limit=1, page=1)
+    assert first.total_hits == len(collected)
+
+
+async def test_docket_sheet_ignores_ferc_association_count(
+    httpx_mock: HTTPXMock, client
+):
+    httpx_mock.add_response(
+        url=DOCKET_URL, json=docket_sheet(CROSS_DOCKETED_SHEET["DataList"][0]
+                                          ["DocumentsItem"], reported_total=380)
+    )
+    sheet = await client.get_docket("EL25-49", limit=100)
+    assert sheet.total_hits == 2
+
+
+async def test_docket_sheet_reports_date_envelope(httpx_mock: HTTPXMock, client):
+    httpx_mock.add_response(url=DOCKET_URL, json=CROSS_DOCKETED_SHEET)
+    sheet = await client.get_docket("EL25-49")
+    assert sheet.date_range_source == "none"
+    assert sheet.results_may_be_date_limited is False
+    assert sheet.date_range_applied == {"start": None, "end": None}
+    assert sheet.date_field_applied == "filed"
+
+
+async def test_docket_sheet_never_defaults_to_60_days(httpx_mock: HTTPXMock, client):
+    httpx_mock.add_response(url=DOCKET_URL, json=CROSS_DOCKETED_SHEET)
+    sheet = await client.get_docket("EL25-49")
+    # A docket number is always scoped, so the 60-day default can never apply.
+    assert sheet.date_range_source != "default_60_day"
+    payload = json.loads(httpx_mock.get_requests()[0].content)
+    assert payload["filed_date_beg"] == "01-01-1960"
+
+
+async def test_docket_sheet_pagination_is_one_indexed(httpx_mock: HTTPXMock, client):
+    httpx_mock.add_response(url=DOCKET_URL, json=CROSS_DOCKETED_SHEET, is_reusable=True)
+    page1 = await client.get_docket("EL25-49", limit=1, page=1)
+    page0 = await client.get_docket("EL25-49", limit=1, page=0)
+    default = await client.get_docket("EL25-49", limit=1)
+    page2 = await client.get_docket("EL25-49", limit=1, page=2)
+    assert page1.page_base == 1
+    first = page1.filings[0].accession_number
+    # page=0 is accepted as the first page rather than erroring.
+    assert page0.filings[0].accession_number == first
+    assert default.filings[0].accession_number == first
+    assert page2.filings[0].accession_number != first
+
+
+async def test_docket_sheet_sort_order(httpx_mock: HTTPXMock, client):
+    httpx_mock.add_response(url=DOCKET_URL, json=CROSS_DOCKETED_SHEET, is_reusable=True)
+    oldest = await client.get_docket("EL25-49", limit=100)
+    newest = await client.get_docket("EL25-49", limit=100, sort_order="newest_first")
+    assert oldest.sort_order == "oldest_first"
+    assert oldest.filings[0].accession_number == "20250220-3091"
+    assert newest.filings[0].accession_number == "20260219-5002"
+    assert oldest.total_hits == newest.total_hits
+
+
+async def test_docket_sheet_suppresses_null_issued_sentinel(
+    httpx_mock: HTTPXMock, client
+):
+    httpx_mock.add_response(url=DOCKET_URL, json=CROSS_DOCKETED_SHEET)
+    sheet = await client.get_docket("EL25-49", limit=100)
+    # 0001-01-01 is the sheet's null, not a date in year 1.
+    assert all(f.issued_date == "" for f in sheet.filings)
+
+
+async def test_docket_sheet_normalizes_dates_like_search(
+    httpx_mock: HTTPXMock, client
+):
+    httpx_mock.add_response(url=DOCKET_URL, json=CROSS_DOCKETED_SHEET)
+    sheet = await client.get_docket("EL25-49", limit=100)
+    assert {f.filed_date for f in sheet.filings} == {"02/19/2026", "02/20/2025"}
+
+
+async def test_docket_issued_window_resolves_through_search(
+    httpx_mock: HTTPXMock, client
+):
+    """The sheet reports every issued_date as null, so search answers instead."""
+    httpx_mock.add_response(
+        url=SEARCH_URL, json=search_with_dockets(["EL25-49"])  # 20201119-5202
+    )
+    httpx_mock.add_response(url=SEARCH_URL, json=EMPTY_SEARCH)
+    httpx_mock.add_response(
+        url=DOCKET_URL,
+        json=docket_sheet(
+            [
+                docket_sheet_row("20201119-5202", sub="000"),
+                docket_sheet_row("20260219-5002", sub="000"),
+            ]
+        ),
+    )
+    sheet = await client.get_docket(
+        "EL25-49", start_date="2026-08-06", end_date="2026-08-06", date_field="issued"
+    )
+    assert sheet.date_field_applied == "issued"
+    assert sheet.date_field_filtered_client_side is True
+    assert {f.accession_number for f in sheet.filings} == {"20201119-5202"}
+    # The issuance window must not also be sent as a filed-date window.
+    docket_payload = json.loads(httpx_mock.get_requests()[-1].content)
+    assert docket_payload["filed_date_beg"] == "01-01-1960"
+
+
+async def test_docket_filed_window_stays_server_side(httpx_mock: HTTPXMock, client):
+    httpx_mock.add_response(url=DOCKET_URL, json=CROSS_DOCKETED_SHEET)
+    sheet = await client.get_docket(
+        "EL25-49", start_date="2025-01-01", end_date="2025-12-31"
+    )
+    payload = json.loads(httpx_mock.get_requests()[0].content)
+    assert payload["filed_date_beg"] == "01-01-2025"
+    assert payload["filed_date_end"] == "12-31-2025"
+    assert sheet.date_field_filtered_client_side is False
+    assert sheet.date_range_source == "explicit"
+
+
+async def test_docket_sheet_requests_everything_once(httpx_mock: HTTPXMock, client):
+    """numHits/pageNumber do not slice reliably, so paging happens locally."""
+    httpx_mock.add_response(url=DOCKET_URL, json=CROSS_DOCKETED_SHEET)
+    await client.get_docket("EL25-49", limit=5, page=3)
+    payload = json.loads(httpx_mock.get_requests()[0].content)
+    assert payload["numHits"] == config.DOCKET_SHEET_FETCH_LIMIT
+    assert payload["pageNumber"] == 0
 
 
 def test_build_search_text():

@@ -31,6 +31,7 @@ from ferc_elibrary_mcp.models import (
     SearchHit,
     SearchResponse,
     SearchScope,
+    SortOrder,
     Transmittal,
     file_list_url,
     hit_to_detail,
@@ -271,13 +272,21 @@ class ELibraryClient:
         subdockets: str = "All",
         start_date: str | None = None,
         end_date: str | None = None,
-        page: int = 0,
+        page: int = 1,
         limit: int = config.DEFAULT_SEARCH_LIMIT,
+        date_field: DateField = "filed",
+        sort_order: SortOrder = "oldest_first",
     ) -> DocketSheet:
         docket_number = docket_number.strip()
         limit = max(1, min(limit, config.MAX_SEARCH_LIMIT))
-        page = max(0, page)
-        start, end = _docket_date_range(start_date, end_date)
+        # page 0 used to be the first page; accept it as 1 rather than erroring.
+        page = max(1, page)
+        dates = resolve_date_range(
+            start_date,
+            end_date,
+            docket=docket_number,
+            date_field=date_field,
+        )
         parent, extracted_sub = split_docket_number(docket_number)
         if subdockets and subdockets != "All":
             sub = subdockets
@@ -287,19 +296,69 @@ class ELibraryClient:
             sub = "All"
         else:
             sub = subdockets or "All"
+
+        # The sheet filters server-side on filed date only, and it reports every
+        # issued_date as the .NET null sentinel, so an issuance window cannot be
+        # answered from its own rows. Resolve that set through search, which
+        # carries real issuance dates and filters on them server-side.
+        issued_window = dates.field == "issued" and (dates.start or dates.end)
+        keep: set[str] | None = None
+        if issued_window:
+            keep = await self._accessions_in_issued_window(
+                docket_number, dates.start, dates.end
+            )
+        window_start, window_end = _docket_window(
+            None if issued_window else dates.start,
+            None if issued_window else dates.end,
+        )
         payload = {
             "dockets": parent,
             "subdockets": sub,
-            "filed_date_beg": start,
-            "filed_date_end": end,
+            "filed_date_beg": window_start,
+            "filed_date_end": window_end,
             "complete_flag": 0,
-            "numHits": limit,
-            "pageNumber": page,
+            # numHits/pageNumber do not slice reliably: rows-per-page exceed the
+            # limit and later pages overlap. Ask for everything and page here.
+            "numHits": config.DOCKET_SHEET_FETCH_LIMIT,
+            "pageNumber": 0,
         }
         raw = await self._request_json(
             "POST", "Docket/GetSingleDocketSheet", json=payload
         )
-        return _parse_docket_sheet(parent, raw, page=page, page_size=limit)
+        if issued_window:
+            dates = dates.model_copy(update={"filtered_client_side": True})
+        return _parse_docket_sheet(
+            parent,
+            raw,
+            page=page,
+            page_size=limit,
+            dates=dates,
+            sort_order=sort_order,
+            keep_accessions=keep,
+        )
+
+    async def _accessions_in_issued_window(
+        self, docket: str, start: str | None, end: str | None
+    ) -> set[str]:
+        """Accessions in a docket whose issuance date falls in the window."""
+        found: set[str] = set()
+        page = 1
+        while page <= config.MAX_CROSS_REFERENCE_PAGES:
+            _parsed, hits, _dates = await self.search(
+                docket=docket,
+                start_date=start,
+                end_date=end,
+                date_field="issued",
+                page=page,
+                limit=config.MAX_SEARCH_LIMIT,
+                # Match the docket sheet, which cannot filter on availability.
+                public_only=False,
+            )
+            if not hits:
+                break
+            found.update(hit.accession_number for hit in hits)
+            page += 1
+        return found
 
     async def download_file(
         self,
@@ -485,7 +544,7 @@ class ELibraryClient:
         groups: list[DocketSheet] = []
         for number in selected:
             sheet = await self.get_docket(
-                number, page=0, limit=max_filings_per_docket
+                number, page=1, limit=max_filings_per_docket
             )
             groups.append(sheet)
 
@@ -664,13 +723,11 @@ def resolve_date_range(
     )
 
 
-def _docket_date_range(
-    start_date: str | None, end_date: str | None
-) -> tuple[str, str]:
-    today = date.today()
-    end = _parse_iso_date(end_date) if end_date else today
-    start = _parse_iso_date(start_date) if start_date else date(1960, 1, 1)
-    return start.strftime("%m-%d-%Y"), end.strftime("%m-%d-%Y")
+def _docket_window(start: str | None, end: str | None) -> tuple[str, str]:
+    """Render an already-resolved range in the MM-DD-YYYY the sheet expects."""
+    parsed_start = _parse_iso_date(start) if start else date(1960, 1, 1)
+    parsed_end = _parse_iso_date(end) if end else date.today()
+    return parsed_start.strftime("%m-%d-%Y"), parsed_end.strftime("%m-%d-%Y")
 
 
 def build_search_text(query: str | None, match: MatchMode) -> str:
@@ -741,6 +798,10 @@ def _ferc_error_detail(response: httpx.Response) -> str:
 
 def _parse_iso_date(value: str) -> date:
     value = value.strip()
+    # The docket sheet returns ISO datetimes ("2026-08-06T00:00:00") where
+    # search returns MM/DD/YYYY.
+    if "T" in value:
+        value = value.split("T", 1)[0]
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
         return date.fromisoformat(value)
     for fmt in ("%m/%d/%Y", "%m-%d-%Y"):
@@ -798,37 +859,124 @@ def _select_transmittal(filing: FilingDetail, file_id: str | None) -> Transmitta
 
 
 def _parse_docket_sheet(
-    docket_number: str, raw: Any, *, page: int, page_size: int
+    docket_number: str,
+    raw: Any,
+    *,
+    page: int,
+    page_size: int,
+    dates: DateRangeResolution,
+    sort_order: SortOrder = "oldest_first",
+    keep_accessions: set[str] | None = None,
 ) -> DocketSheet:
+    """Collapse docket-association rows into one row per accession.
+
+    GetSingleDocketSheet returns one row per (accession, subdocket) pair and a
+    totalHits that counts associations, so a filing captioned to -000, -001 and
+    -002 appears three times and is counted three times. Callers want filings,
+    so rows are merged on accession number and every subdocket is preserved in
+    docket_numbers. Reporting FERC's count directly overstated EL25-49 as 380
+    against 312 actual filings.
+    """
     if not isinstance(raw, dict):
         raise ELibraryRequestError("Docket sheet response was not a JSON object")
-    page_info = raw.get("Page") or {}
-    filings: list[DocketFiling] = []
+
+    merged: dict[str, DocketFiling] = {}
     applicants: list[str] = []
+    subdockets_seen: set[str] = set()
     for group in raw.get("DataList") or []:
         for doc in group.get("DocumentsItem") or []:
             accession = str(doc.get("accession_no") or "")
+            if not accession:
+                continue
             orgs = [str(o) for o in (doc.get("Affiliation_Organization") or []) if o]
             for org in orgs:
                 if org not in applicants:
                     applicants.append(org)
-            filings.append(
-                DocketFiling(
-                    accession_number=accession,
-                    description=str(doc.get("doc_desc") or ""),
-                    category=doc.get("category"),
-                    filed_date=str(doc.get("filed_date") or ""),
-                    docket=str(doc.get("DOCKET_TEXT") or docket_number),
-                    sub_docket=str(doc.get("SUBDOCKET_TEXT") or ""),
-                    organizations=orgs,
-                    url=file_list_url(accession) if accession else "",
-                )
+            parent = str(doc.get("DOCKET_TEXT") or docket_number)
+            sub = str(doc.get("SUBDOCKET_TEXT") or "")
+            if sub:
+                subdockets_seen.add(sub)
+            qualified = f"{parent}-{sub}" if sub else parent
+
+            existing = merged.get(accession)
+            if existing is not None:
+                if qualified not in existing.docket_numbers:
+                    existing.docket_numbers.append(qualified)
+                if sub and sub not in existing.sub_dockets:
+                    existing.sub_dockets.append(sub)
+                for org in orgs:
+                    if org not in existing.organizations:
+                        existing.organizations.append(org)
+                continue
+
+            merged[accession] = DocketFiling(
+                accession_number=accession,
+                description=str(doc.get("doc_desc") or ""),
+                category=doc.get("category"),
+                filed_date=_display_date(str(doc.get("filed_date") or "")),
+                issued_date=_display_date(str(doc.get("issued_date") or "")),
+                docket=parent,
+                sub_docket=sub,
+                docket_numbers=[qualified],
+                sub_dockets=[sub] if sub else [],
+                organizations=orgs,
+                url=file_list_url(accession),
             )
+
+    filings = list(merged.values())
+    if keep_accessions is not None:
+        filings = [f for f in filings if f.accession_number in keep_accessions]
+
+    filings.sort(
+        key=lambda f: (_sort_key(f.filed_date), f.accession_number),
+        reverse=sort_order == "newest_first",
+    )
+
+    total = len(filings)
+    start = (page - 1) * page_size
     return DocketSheet(
         docket_number=docket_number,
-        total_hits=int(page_info.get("totalHits") or len(filings)),
-        page=int(page_info.get("pageNumber") or page),
+        total_hits=total,
+        page=page,
         page_size=page_size,
+        page_base=1,
+        count_basis="distinct_accession",
+        includes_subdockets=sorted(subdockets_seen),
+        availability_scope="all",
+        sort_order=sort_order,
         applicants=applicants,
-        filings=filings,
+        filings=filings[start : start + page_size],
+        **{
+            key: value
+            for key, value in dates.as_envelope().items()
+            if key != "date_range_applied"
+        },
+        date_range_applied={"start": dates.start, "end": dates.end},
     )
+
+
+def _sort_key(value: str) -> date:
+    try:
+        return _parse_iso_date(value)
+    except ValueError:
+        return date(1900, 1, 1)
+
+
+def _display_date(value: str) -> str:
+    """Normalize a docket-sheet date to the MM/DD/YYYY that search returns.
+
+    The sheet uses .NET DateTime.MinValue ("0001-01-01") as its null, so that
+    sentinel becomes an empty string rather than a date in year 1.
+    """
+    value = (value or "").strip()
+    if not value:
+        return ""
+    try:
+        parsed = _parse_iso_date(value)
+    except ValueError:
+        return value
+    if parsed.year <= 1:
+        return ""
+    return parsed.strftime("%m/%d/%Y")
+
+

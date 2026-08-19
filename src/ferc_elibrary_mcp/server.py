@@ -13,6 +13,7 @@ from ferc_elibrary_mcp.models import (
     DownloadFormat,
     MatchMode,
     SearchScope,
+    SortOrder,
 )
 
 mcp = FastMCP(
@@ -140,13 +141,36 @@ async def get_docket(
     subdockets: str = "All",
     start_date: str | None = None,
     end_date: str | None = None,
-    page: int = 0,
+    page: int = 1,
     limit: int = config.DEFAULT_SEARCH_LIMIT,
+    date_field: DateField = "filed",
+    sort_order: SortOrder = "oldest_first",
 ) -> dict[str, Any]:
     """Return the docket sheet: related filings, applicants, and accession numbers.
 
     Docket numbers look like CP21-470, ER11-4046, or P-15056-000. Subdockets can
     be All or a comma-separated list such as 000,001.
+
+    page is 1-indexed, matching search_filings. page=0 is accepted as page 1.
+
+    One row per filing: eLibrary returns one row per docket association, so a
+    pleading captioned to -000, -001 and -002 arrives three times. Rows are
+    merged on accession number and every association is listed in
+    docket_numbers, so total_hits counts filings you can actually retrieve.
+    count_basis reports distinct_accession to make that explicit.
+
+    Scope differs from search_filings in one way worth knowing: the docket sheet
+    carries no availability code, so it cannot filter by availability and
+    reports availability_scope "all". search_filings is public-only by default,
+    so a docket sheet may list a few privileged filings that search omits.
+
+    sort_order defaults to oldest_first, the chronological order of a docket
+    sheet. search_filings returns newest first. Pass newest_first to match it.
+
+    date_field and the date envelope behave as in search_filings. Since a docket
+    number is always supplied, no 60-day default is ever applied here. An
+    issued-date window is applied to rows after retrieval, reported via
+    date_field_filtered_client_side.
     """
     try:
         sheet = await get_client().get_docket(
@@ -156,6 +180,8 @@ async def get_docket(
             end_date=end_date,
             page=page,
             limit=limit,
+            date_field=date_field,
+            sort_order=sort_order,
         )
     except Exception as exc:
         _tool_error(exc)

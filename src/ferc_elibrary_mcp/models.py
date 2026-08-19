@@ -18,6 +18,9 @@ MatchMode = Literal["phrase", "all", "any"]
 SearchScope = Literal["description", "full_text", "both"]
 DateField = Literal["filed", "issued"]
 DateRangeSource = Literal["explicit", "default_60_day", "none"]
+CountBasis = Literal["distinct_accession", "docket_association"]
+AvailabilityScope = Literal["public_only", "all"]
+SortOrder = Literal["oldest_first", "newest_first"]
 
 
 class Affiliation(BaseModel):
@@ -123,12 +126,19 @@ class FilingDetail(FilingSummary):
 
 
 class DateRangeResolution(BaseModel):
-    """What date filter was actually applied, and why."""
+    """What date filter was actually applied, and why.
+
+    Every search-shaped tool resolves its window through this one type and
+    reports it via as_envelope(), so a caller can never mistake a filtered
+    count for a total. Adding a second copy of this logic is what let the
+    silent-window defect reappear in get_docket.
+    """
 
     start: str | None = None
     end: str | None = None
     source: DateRangeSource = "none"
     field: DateField = "filed"
+    filtered_client_side: bool = False
 
     @property
     def may_be_date_limited(self) -> bool:
@@ -140,6 +150,7 @@ class DateRangeResolution(BaseModel):
             "date_range_source": self.source,
             "date_field_applied": self.field,
             "results_may_be_date_limited": self.may_be_date_limited,
+            "date_field_filtered_client_side": self.filtered_client_side,
         }
 
 
@@ -148,8 +159,13 @@ class DocketFiling(BaseModel):
     description: str
     category: str | None = None
     filed_date: str = ""
+    issued_date: str = ""
     docket: str = ""
     sub_docket: str = ""
+    # Every subdocket this accession is captioned to. Consolidated proceedings
+    # cross-docket heavily, and collapsing this to one pair loses that.
+    docket_numbers: list[str] = Field(default_factory=list)
+    sub_dockets: list[str] = Field(default_factory=list)
     organizations: list[str] = Field(default_factory=list)
     url: str = ""
 
@@ -159,6 +175,18 @@ class DocketSheet(BaseModel):
     total_hits: int
     page: int
     page_size: int
+    page_base: int = 1
+    count_basis: CountBasis = "distinct_accession"
+    includes_subdockets: list[str] = Field(default_factory=list)
+    # The docket sheet exposes no availability code, so unlike search_filings
+    # (public-only by default) it cannot filter by availability.
+    availability_scope: AvailabilityScope = "all"
+    sort_order: SortOrder = "oldest_first"
+    date_range_applied: dict[str, str | None] = Field(default_factory=dict)
+    date_range_source: DateRangeSource = "none"
+    date_field_applied: DateField = "filed"
+    results_may_be_date_limited: bool = False
+    date_field_filtered_client_side: bool = False
     applicants: list[str] = Field(default_factory=list)
     filings: list[DocketFiling] = Field(default_factory=list)
 

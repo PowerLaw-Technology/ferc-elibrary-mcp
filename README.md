@@ -23,7 +23,7 @@ uv sync
 | Tool | Purpose |
 | --- | --- |
 | `search_filings` | Keyword, docket, accession, document type, category, and industry search. Public filings only. See [Date filtering](#date-filtering) for how the date window is chosen. |
-| `get_docket` | Docket sheet: related filings, applicants, accession numbers. |
+| `get_docket` | Docket sheet: related filings, applicants, accession numbers. See [Docket sheets vs search](#docket-sheets-vs-search) for how it differs from `search_filings`. |
 | `get_filing` | Metadata for one accession (`YYYYMMDD-NNNN`). |
 | `list_files` | Files attached to an accession (call before downloading). |
 | `download_file` | Save a **public** single file, accession zip, or generated PDF under `FERC_DOWNLOAD_DIR`. Does not return bytes. |
@@ -41,9 +41,21 @@ Date defaults are scope-aware, because a 60-day window layered on a named docket
 | open-ended query, no dates | last 60 days | `default_60_day` |
 | any explicit `start_date`/`end_date` | as given | `explicit` |
 
-Every `search_filings` and `collect_related` response reports `date_range_applied`, `date_range_source`, `date_field_applied`, and `results_may_be_date_limited` — including empty results, since an empty set under an unnoticed default is the case most likely to mislead. Treat `total_hits` as a complete count only when `results_may_be_date_limited` is false.
+Every date-accepting tool — `search_filings`, `collect_related`, and `get_docket` — reports `date_range_applied`, `date_range_source`, `date_field_applied`, `results_may_be_date_limited`, and `date_field_filtered_client_side`, including on empty results, since an empty set under an unnoticed default is the case most likely to mislead. Treat `total_hits` as a complete count only when `results_may_be_date_limited` is false.
+
+All three resolve their window through a single `resolve_date_range` helper and report it via `DateRangeResolution.as_envelope()`. A registry test walks the tool list and fails if any tool accepting `start_date` omits the envelope or a `date_field` parameter, so a new search-shaped tool is covered the day it is added.
 
 `date_field` selects which date the range filters on, `filed` (default) or `issued`. Use `issued` for deadline arithmetic: FPA 313(a) rehearing and most Commission-set comment and compliance clocks run from issuance, and the two dates diverge. On `ER26-3176`, accession `20260807-5037` was filed 08/07 but issued 08/06, so a filed-date search for 08/06 misses it. Both are filtered server-side by eLibrary, so paging stays exact.
+
+## Docket sheets vs search
+
+`get_docket` and `search_filings` cover the same filings but reach them differently, and the differences are reported rather than left to be discovered:
+
+- **One row per filing.** eLibrary returns one row per *docket association*, so a pleading captioned to `-000`, `-001`, and `-002` arrives three times and its `totalHits` counts it three times. Rows are merged on accession number, every association is preserved in `docket_numbers`, and `count_basis` reports `distinct_accession`. On EL25-49 that is the difference between FERC's reported 380 and the 312 filings you can actually retrieve.
+- **Paging is client-side.** `numHits` and `pageNumber` do not slice the sheet reliably — rows per page exceed the requested limit and later pages overlap — so the sheet is fetched once and paginated locally. `page` is 1-indexed on both tools; `page=0` is accepted as page 1.
+- **Availability.** The sheet carries no availability code, so `get_docket` cannot filter on it and reports `availability_scope: "all"`. `search_filings` is public-only by default. A docket sheet may therefore list a few privileged filings that search omits; on EL25-49 that is 3 of 312.
+- **Ordering.** `get_docket` returns oldest-first (chronological, like a docket sheet), `search_filings` newest-first. Pass `sort_order="newest_first"` to align them.
+- **Issuance dates.** The sheet reports every `issued_date` as the .NET null sentinel `0001-01-01`, so it is surfaced as an empty string rather than a date in year 1. `date_field="issued"` on `get_docket` resolves the window through the search endpoint, which carries real issuance dates, and sets `date_field_filtered_client_side: true`.
 
 ## Sealed counterparts
 

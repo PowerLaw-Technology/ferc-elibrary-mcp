@@ -54,6 +54,15 @@ SAMPLE_SEARCH = {
     "searchResultId": None,
 }
 
+EMPTY_SEARCH = {
+    "searchHits": [],
+    "totalHits": 0,
+    "numHits": 0,
+    "success": True,
+    "errorMessage": None,
+    "searchResultId": None,
+}
+
 SAMPLE_DOCKET_SHEET = {
     "Page": {"totalHits": 1, "numHits": 1, "pageNumber": 0},
     "ErrorList": [],
@@ -85,6 +94,65 @@ SAMPLE_DOCKET_SHEET = {
         }
     ],
 }
+
+
+def docket_sheet_row(
+    accession: str,
+    *,
+    sub: str = "000",
+    docket: str = "EL25-49",
+    filed: str = "2026-02-19T00:00:00",
+    desc: str = "Motion to Intervene",
+    orgs: list[str] | None = None,
+) -> dict:
+    return {
+        "document_id": 0,
+        "category_cd": 0,
+        "DOCKET_TEXT": docket,
+        "SUBDOCKET_TEXT": sub,
+        "DOCKET_CODE": None,
+        "subDocketNumber": 0,
+        "accession_no": accession,
+        "accession_date": filed,
+        "availability_code": None,
+        "category": "Submittal",
+        "doc_desc": desc,
+        "Affiliation_Organization": orgs if orgs is not None else ["Some Utility, LLC"],
+        "filed_date": filed,
+        # The sheet always returns the .NET null sentinel for issuance.
+        "issued_date": "0001-01-01T00:00:00",
+        "fed_reg_date": None,
+        "comments_due_date": None,
+        "FERC_CITE": None,
+    }
+
+
+def docket_sheet(rows: list[dict], *, reported_total: int | None = None) -> dict:
+    """Docket sheet whose Page.totalHits counts associations, as FERC's does."""
+    return {
+        "Page": {
+            "totalHits": reported_total if reported_total is not None else len(rows),
+            "numHits": len(rows),
+            "pageNumber": 0,
+        },
+        "ErrorList": [],
+        "DataList": [
+            {"DocumentsItem": rows, "AuthorsItem": [], "FedCitesItem": []}
+        ],
+    }
+
+
+# One filing captioned to three subdockets plus one captioned to one: four
+# association rows, two actual filings. This is the EL25-49 shape.
+CROSS_DOCKETED_SHEET = docket_sheet(
+    [
+        docket_sheet_row("20260219-5002", sub="000", filed="2026-02-19T00:00:00"),
+        docket_sheet_row("20260219-5002", sub="001", filed="2026-02-19T00:00:00"),
+        docket_sheet_row("20260219-5002", sub="002", filed="2026-02-19T00:00:00"),
+        docket_sheet_row("20250220-3091", sub="000", filed="2025-02-20T00:00:00"),
+    ],
+    reported_total=4,
+)
 
 
 def search_with_files(files: list[dict]) -> dict:

@@ -296,6 +296,214 @@ async def test_live_document_type_filter_matches_class_type_prefix():
     assert "20260818-3060" in {h.accession_number for h in hits}
 
 
+async def _all_docket_rows(client, docket: str) -> list:
+    rows = []
+    page = 1
+    while page <= 20:
+        sheet = await client.get_docket(docket, limit=100, page=page)
+        if not sheet.filings:
+            break
+        rows += sheet.filings
+        page += 1
+    return rows
+
+
+async def _all_accessions_get_docket(client, docket: str) -> set[str]:
+    found: set[str] = set()
+    page = 1
+    while page <= 20:
+        sheet = await client.get_docket(docket, limit=100, page=page)
+        if not sheet.filings:
+            break
+        found |= {f.accession_number for f in sheet.filings}
+        page += 1
+    return found
+
+
+async def _all_accessions_search(client, docket: str, *, public_only: bool) -> set[str]:
+    found: set[str] = set()
+    page = 1
+    while page <= 20:
+        _parsed, hits, _dates = await client.search(
+            docket=docket, limit=100, page=page, public_only=public_only
+        )
+        if not hits:
+            break
+        found |= {h.accession_number for h in hits}
+        page += 1
+    return found
+
+
+# --- Issue 4: get_docket and search_filings must agree on membership -------
+
+
+@pytest.mark.live
+async def test_live_get_docket_and_search_agree_on_membership():
+    """The 71-filing gap was association double counting plus availability.
+
+    get_docket cannot filter on availability (the sheet carries no availability
+    code), so it is compared against search with the same scope. Asserting the
+    relationship rather than a count, since EL25-49 is live.
+    """
+    async with ELibraryClient(rate_limit_seconds=0.3) as client:
+        sheet_accessions = await _all_accessions_get_docket(client, "EL25-49")
+        search_all = await _all_accessions_search(client, "EL25-49", public_only=False)
+        search_public = await _all_accessions_search(
+            client, "EL25-49", public_only=True
+        )
+    assert sheet_accessions == search_all
+    # Everything search omits under its public-only default is non-public.
+    assert search_public <= sheet_accessions
+
+
+@pytest.mark.live
+async def test_live_get_docket_total_matches_retrievable_rows():
+    async with ELibraryClient(rate_limit_seconds=0.3) as client:
+        sheet = await client.get_docket("EL25-49", limit=100, page=1)
+        retrievable = await _all_accessions_get_docket(client, "EL25-49")
+    assert sheet.total_hits == len(retrievable)
+    assert sheet.count_basis == "distinct_accession"
+
+
+@pytest.mark.live
+async def test_live_get_docket_returns_no_duplicate_rows():
+    async with ELibraryClient(rate_limit_seconds=0.3) as client:
+        rows: list[str] = []
+        page = 1
+        while page <= 20:
+            sheet = await client.get_docket("EL25-49", limit=100, page=page)
+            if not sheet.filings:
+                break
+            rows += [f.accession_number for f in sheet.filings]
+            page += 1
+    assert len(rows) == len(set(rows))
+
+
+@pytest.mark.live
+async def test_live_get_docket_reports_count_basis_and_subdockets():
+    async with ELibraryClient(rate_limit_seconds=0.3) as client:
+        sheet = await client.get_docket("EL25-49", limit=5)
+    assert sheet.count_basis in ("distinct_accession", "docket_association")
+    assert sheet.includes_subdockets
+    assert sheet.availability_scope == "all"
+
+
+@pytest.mark.live
+async def test_live_get_docket_rows_carry_full_docket_array():
+    async with ELibraryClient(rate_limit_seconds=0.3) as client:
+        rows = await _all_docket_rows(client, "EL25-49")
+    assert rows
+    assert all(f.docket_numbers for f in rows)
+    # EL25-49 is consolidated, so some filings carry several associations.
+    assert any(len(f.docket_numbers) > 1 for f in rows)
+
+
+@pytest.mark.live
+async def test_live_known_order_is_cross_docketed():
+    """20251218-3081 is captioned to both EL25-49-000 and -001.
+
+    Scanned across pages rather than pinned to one, since a filing's page
+    position moves as the docket grows.
+    """
+    async with ELibraryClient(rate_limit_seconds=0.3) as client:
+        rows = await _all_docket_rows(client, "EL25-49")
+    row = next((f for f in rows if f.accession_number == "20251218-3081"), None)
+    assert row is not None
+    assert row.docket_numbers == ["EL25-49-000", "EL25-49-001"]
+
+
+# --- Issue 5: get_docket must report its window ----------------------------
+
+
+@pytest.mark.live
+async def test_live_get_docket_reports_date_envelope():
+    async with ELibraryClient(rate_limit_seconds=0.3) as client:
+        sheet = await client.get_docket("EL25-49", limit=5)
+    assert sheet.date_range_source == "none"
+    assert sheet.results_may_be_date_limited is False
+    assert sheet.date_range_applied == {"start": None, "end": None}
+
+
+@pytest.mark.live
+async def test_live_get_docket_supports_issued_date_field():
+    async with ELibraryClient(rate_limit_seconds=0.3) as client:
+        sheet = await client.get_docket(
+            "ER26-3176",
+            start_date="2026-08-06",
+            end_date="2026-08-06",
+            date_field="issued",
+            limit=100,
+        )
+    assert sheet.date_field_applied == "issued"
+    assert sheet.date_field_filtered_client_side is True
+    assert "20260807-5037" in {f.accession_number for f in sheet.filings}
+
+
+@pytest.mark.live
+async def test_live_get_docket_filed_field_excludes_divergent_filing():
+    async with ELibraryClient(rate_limit_seconds=0.3) as client:
+        sheet = await client.get_docket(
+            "ER26-3176", start_date="2026-08-06", end_date="2026-08-06", limit=100
+        )
+    assert sheet.date_field_applied == "filed"
+    assert sheet.date_field_filtered_client_side is False
+    assert "20260807-5037" not in {f.accession_number for f in sheet.filings}
+
+
+@pytest.mark.live
+async def test_live_get_docket_suppresses_null_issued_sentinel():
+    """The sheet returns 0001-01-01 for every issuance date."""
+    async with ELibraryClient(rate_limit_seconds=0.3) as client:
+        sheet = await client.get_docket("EL25-49", limit=25)
+    assert all(f.issued_date == "" for f in sheet.filings)
+
+
+@pytest.mark.live
+async def test_live_get_docket_dates_match_search_format():
+    async with ELibraryClient(rate_limit_seconds=0.3) as client:
+        sheet = await client.get_docket(
+            "ER26-3176", start_date="2026-08-06", end_date="2026-08-06", limit=25
+        )
+        _parsed, hits, _dates = await client.search(
+            docket="ER26-3176",
+            start_date="2026-08-06",
+            end_date="2026-08-06",
+            limit=25,
+        )
+    assert {f.filed_date for f in sheet.filings} == {h.filed_date for h in hits}
+
+
+# --- Issue 6: pagination base and ordering --------------------------------
+
+
+@pytest.mark.live
+async def test_live_get_docket_pagination_is_one_indexed():
+    async with ELibraryClient(rate_limit_seconds=0.3) as client:
+        page1 = await client.get_docket("EL25-49", limit=3, page=1)
+        page0 = await client.get_docket("EL25-49", limit=3, page=0)
+        default = await client.get_docket("EL25-49", limit=3)
+        page2 = await client.get_docket("EL25-49", limit=3, page=2)
+    first = [f.accession_number for f in page1.filings]
+    assert page1.page_base == 1
+    assert [f.accession_number for f in page0.filings] == first
+    assert [f.accession_number for f in default.filings] == first
+    assert not set(first) & {f.accession_number for f in page2.filings}
+
+
+@pytest.mark.live
+async def test_live_get_docket_sort_order():
+    async with ELibraryClient(rate_limit_seconds=0.3) as client:
+        oldest = await client.get_docket("EL25-49", limit=3)
+        newest = await client.get_docket("EL25-49", limit=3, sort_order="newest_first")
+    assert oldest.sort_order == "oldest_first"
+    assert oldest.total_hits == newest.total_hits
+    first_old = oldest.filings[0].accession_number
+    first_new = newest.filings[0].accession_number
+    assert first_old != first_new
+    # 20241004-4000 is the earliest filing in the proceeding.
+    assert first_old == "20241004-4000"
+
+
 @pytest.mark.live
 async def test_live_single_file_download_is_not_a_bundle(tmp_path):
     async with ELibraryClient(download_dir=tmp_path, rate_limit_seconds=0.5) as client:

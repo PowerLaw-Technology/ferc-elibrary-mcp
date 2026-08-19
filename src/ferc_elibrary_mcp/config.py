@@ -28,6 +28,13 @@ DESCRIPTION_MAX_LEN = 500
 
 DEFAULT_LOOKBACK_DAYS = 60
 
+# GetSingleDocketSheet ignores numHits/pageNumber slicing and returns the whole
+# association set, so the sheet is fetched once and paginated client-side.
+DOCKET_SHEET_FETCH_LIMIT = 5000
+
+# Paging bound when resolving a docket sheet's issuance window through search.
+MAX_CROSS_REFERENCE_PAGES = 20
+
 # eLibrary silently returns zero hits for an unrecognized dateType, so only
 # these verified values may ever reach the wire.
 DATE_FIELD_TYPES = {"filed": "filed_date", "issued": "issued_date"}
