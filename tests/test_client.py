@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from ferc_elibrary_mcp.client import (
     ELibraryClient,
     build_search_text,
     guess_content_type,
+    resolve_date_range,
     split_docket_number,
 )
 from ferc_elibrary_mcp.config import BASE_URL
@@ -19,7 +21,13 @@ from ferc_elibrary_mcp.exceptions import (
     FilingNotFoundError,
     RestrictedDocumentError,
 )
-from tests.fixtures import SAMPLE_DOCKET_SHEET, SAMPLE_SEARCH, search_with_dockets
+from ferc_elibrary_mcp.models import FileSummary, detect_nonpublic_counterpart
+from tests.fixtures import (
+    SAMPLE_DOCKET_SHEET,
+    SAMPLE_SEARCH,
+    search_with_dockets,
+    search_with_files,
+)
 
 SEARCH_URL = re.compile(rf"{re.escape(BASE_URL.rstrip('/'))}/Search/AdvancedSearch")
 DOCKET_URL = re.compile(rf"{re.escape(BASE_URL.rstrip('/'))}/Docket/GetSingleDocketSheet")
@@ -33,7 +41,7 @@ def client(tmp_path):
 
 async def test_search_normalizes_accession_and_truncates(httpx_mock: HTTPXMock, client):
     httpx_mock.add_response(url=SEARCH_URL, json=SAMPLE_SEARCH)
-    parsed, hits = await client.search(query="ashokan", docket="P-15056-000")
+    parsed, hits, _ = await client.search(query="ashokan", docket="P-15056-000")
     assert parsed.total_hits == 1
     assert hits[0].accession_number == "20201119-5202"
     assert "acesssion" not in hits[0].model_dump()
@@ -85,7 +93,7 @@ async def test_search_surfaces_ferc_null_reference(httpx_mock: HTTPXMock, client
 async def test_transient_proxy_error_is_retried(httpx_mock: HTTPXMock, client):
     httpx_mock.add_response(url=SEARCH_URL, status_code=520, text="upstream boom")
     httpx_mock.add_response(url=SEARCH_URL, json=SAMPLE_SEARCH)
-    parsed, _ = await client.search(query="pipeline")
+    parsed, _, _dates = await client.search(query="pipeline")
     assert parsed.total_hits == 1
     assert len(httpx_mock.get_requests()) == 2
 
@@ -132,6 +140,171 @@ async def test_get_docket_sheet(httpx_mock: HTTPXMock, client):
     assert sheet.applicants == ["Premium Energy Holdings, LLC"]
     assert sheet.filings[0].accession_number == "20201119-5202"
     assert "elibrary.ferc.gov" in sheet.filings[0].url
+
+
+def test_docket_scope_suppresses_date_default():
+    """A named docket is an intentional scope; a 60-day window would hide it."""
+    resolved = resolve_date_range(None, None, docket="EL25-49")
+    assert resolved.source == "none"
+    assert resolved.start is None and resolved.end is None
+    assert resolved.may_be_date_limited is False
+
+
+def test_accession_scope_suppresses_date_default():
+    resolved = resolve_date_range(None, None, accession_number="20250220-3091")
+    assert resolved.source == "none"
+
+
+def test_open_ended_query_keeps_default_window():
+    resolved = resolve_date_range(None, None)
+    assert resolved.source == "default_60_day"
+    assert resolved.may_be_date_limited is True
+    expected = (date.today() - timedelta(days=60)).isoformat()
+    assert resolved.start == expected
+
+
+def test_explicit_dates_win_over_scope():
+    resolved = resolve_date_range("2024-01-01", "2026-08-19", docket="EL25-49")
+    assert resolved.source == "explicit"
+    assert resolved.start == "2024-01-01"
+    assert resolved.end == "2026-08-19"
+    assert resolved.may_be_date_limited is False
+
+
+def test_one_sided_explicit_range_is_explicit():
+    assert resolve_date_range("2024-01-01", None).source == "explicit"
+    assert resolve_date_range(None, "2024-01-01").source == "explicit"
+
+
+def test_date_field_must_be_known():
+    # eLibrary returns zero hits for an unknown dateType instead of erroring.
+    with pytest.raises(ValueError, match="Unrecognized date_field"):
+        resolve_date_range(None, None, date_field="issuedDate")
+
+
+def test_date_envelope_shape():
+    envelope = resolve_date_range(None, None, docket="EL25-49").as_envelope()
+    assert envelope == {
+        "date_range_applied": {"start": None, "end": None},
+        "date_range_source": "none",
+        "date_field_applied": "filed",
+        "results_may_be_date_limited": False,
+    }
+
+
+async def test_docket_search_omits_date_filter(httpx_mock: HTTPXMock, client):
+    httpx_mock.add_response(url=SEARCH_URL, json=SAMPLE_SEARCH)
+    _parsed, _hits, dates = await client.search(docket="EL25-49")
+    payload = json.loads(httpx_mock.get_requests()[0].content)
+    assert payload["allDates"] is True
+    assert payload["dateSearches"] == []
+    assert dates.source == "none"
+
+
+async def test_bare_query_sends_date_filter(httpx_mock: HTTPXMock, client):
+    httpx_mock.add_response(url=SEARCH_URL, json=SAMPLE_SEARCH)
+    _parsed, _hits, dates = await client.search(query="interconnection")
+    payload = json.loads(httpx_mock.get_requests()[0].content)
+    assert payload["allDates"] is False
+    assert payload["dateSearches"][0]["dateType"] == "filed_date"
+    assert dates.source == "default_60_day"
+
+
+async def test_issued_date_field_changes_wire_date_type(httpx_mock: HTTPXMock, client):
+    httpx_mock.add_response(url=SEARCH_URL, json=SAMPLE_SEARCH)
+    _parsed, _hits, dates = await client.search(
+        docket="ER26-3176",
+        start_date="2026-08-06",
+        end_date="2026-08-06",
+        date_field="issued",
+    )
+    payload = json.loads(httpx_mock.get_requests()[0].content)
+    assert payload["dateSearches"][0]["dateType"] == "issued_date"
+    assert dates.field == "issued"
+    assert dates.as_envelope()["date_field_applied"] == "issued"
+
+
+async def test_filed_date_is_the_default_field(httpx_mock: HTTPXMock, client):
+    httpx_mock.add_response(url=SEARCH_URL, json=SAMPLE_SEARCH)
+    await client.search(docket="ER26-3176", start_date="2026-08-06")
+    payload = json.loads(httpx_mock.get_requests()[0].content)
+    assert payload["dateSearches"][0]["dateType"] == "filed_date"
+
+
+async def test_collect_related_reports_date_range(httpx_mock: HTTPXMock, client):
+    httpx_mock.add_response(url=SEARCH_URL, json=search_with_dockets(["ER26-1"]))
+    httpx_mock.add_response(url=DOCKET_URL, json=SAMPLE_DOCKET_SHEET)
+    collection = await client.collect_related(query="interconnection")
+    assert collection.date_range_source == "default_60_day"
+    assert collection.results_may_be_date_limited is True
+    assert collection.date_range_applied["start"] is not None
+    assert collection.date_field_applied == "filed"
+
+
+async def test_collect_related_docket_scope_has_no_date_default(
+    httpx_mock: HTTPXMock, client
+):
+    httpx_mock.add_response(url=SEARCH_URL, json=search_with_dockets(["EL25-49"]))
+    httpx_mock.add_response(url=DOCKET_URL, json=SAMPLE_DOCKET_SHEET)
+    collection = await client.collect_related(docket="EL25-49")
+    assert collection.date_range_source == "none"
+    assert collection.results_may_be_date_limited is False
+
+
+def test_malformed_date_message_names_both_formats():
+    with pytest.raises(ValueError, match="YYYY-MM-DD or MM/DD/YYYY"):
+        resolve_date_range("yesterday", None)
+
+
+@pytest.mark.parametrize(
+    "files,expected",
+    [
+        ([{"fileDesc": "PUBLIC Equitrans, L.P. Answer to Complaint"}], True),
+        ([{"fileName": "PUBLIC_NextEra_Exhibit_A__(FINAL).pdf"}], True),
+        ([{"fileName": "Redacted Exhibit B.pdf"}], True),
+        ([{"fileDesc": "Public Version of Testimony"}], True),
+        ([{"fileName": "Sebree Solar SFA.pdf"}], False),
+        # Utility names starting with "Public" must not trip the heuristic.
+        ([{"fileDesc": "Public Service Company of Colorado tariff filing"}], False),
+        ([{"fileName": "Public Utility Regulatory Policies Act filing.pdf"}], False),
+        ([{"fileDesc": "Comments in the public interest"}], False),
+    ],
+)
+def test_detect_nonpublic_counterpart(files, expected):
+    summaries = [
+        FileSummary(
+            file_id=f"F{i}",
+            file_name=f.get("fileName", ""),
+            file_type="PDF",
+            file_size=100,
+            description=f.get("fileDesc", ""),
+        )
+        for i, f in enumerate(files)
+    ]
+    flagged, basis = detect_nonpublic_counterpart(summaries)
+    assert flagged is expected
+    assert basis == ("file_naming_convention" if expected else None)
+
+
+async def test_get_filing_flags_nonpublic_counterpart(httpx_mock: HTTPXMock, client):
+    httpx_mock.add_response(
+        url=SEARCH_URL,
+        json=search_with_files(
+            [{"fileDesc": "PUBLIC Equitrans, L.P. Answer to Complaint of M4 Energy"}]
+        ),
+    )
+    filing = await client.get_filing("20260817-5147")
+    assert filing.has_nonpublic_counterpart is True
+    assert filing.nonpublic_counterpart_basis == "file_naming_convention"
+
+
+async def test_get_filing_no_counterpart_on_ordinary_filing(
+    httpx_mock: HTTPXMock, client
+):
+    httpx_mock.add_response(url=SEARCH_URL, json=SAMPLE_SEARCH)
+    filing = await client.get_filing("20201119-5202")
+    assert filing.has_nonpublic_counterpart is False
+    assert filing.nonpublic_counterpart_basis is None
 
 
 def test_build_search_text():

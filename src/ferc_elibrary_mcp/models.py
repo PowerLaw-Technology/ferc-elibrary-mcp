@@ -1,10 +1,23 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ferc_elibrary_mcp.config import DESCRIPTION_MAX_LEN, ELIBRARY_UI_BASE
+from ferc_elibrary_mcp.config import (
+    DESCRIPTION_MAX_LEN,
+    ELIBRARY_UI_BASE,
+    NONPUBLIC_KEYWORDS,
+    NONPUBLIC_PREFIX_EXCEPTIONS,
+    NONPUBLIC_PREFIX_RE,
+)
+
+DownloadFormat = Literal["native", "pdf", "zip"]
+MatchMode = Literal["phrase", "all", "any"]
+SearchScope = Literal["description", "full_text", "both"]
+DateField = Literal["filed", "issued"]
+DateRangeSource = Literal["explicit", "default_60_day", "none"]
 
 
 class Affiliation(BaseModel):
@@ -105,6 +118,29 @@ class FilingSummary(BaseModel):
 
 class FilingDetail(FilingSummary):
     affiliations: list[Affiliation] = Field(default_factory=list)
+    has_nonpublic_counterpart: bool = False
+    nonpublic_counterpart_basis: str | None = None
+
+
+class DateRangeResolution(BaseModel):
+    """What date filter was actually applied, and why."""
+
+    start: str | None = None
+    end: str | None = None
+    source: DateRangeSource = "none"
+    field: DateField = "filed"
+
+    @property
+    def may_be_date_limited(self) -> bool:
+        return self.source == "default_60_day"
+
+    def as_envelope(self) -> dict[str, Any]:
+        return {
+            "date_range_applied": {"start": self.start, "end": self.end},
+            "date_range_source": self.source,
+            "date_field_applied": self.field,
+            "results_may_be_date_limited": self.may_be_date_limited,
+        }
 
 
 class DocketFiling(BaseModel):
@@ -144,6 +180,10 @@ class DownloadResult(BaseModel):
 class RelatedCollection(BaseModel):
     query: str | None = None
     document_type: str | None = None
+    date_range_applied: dict[str, str | None] = Field(default_factory=dict)
+    date_range_source: DateRangeSource = "none"
+    date_field_applied: DateField = "filed"
+    results_may_be_date_limited: bool = False
     search_total_hits: int
     dockets_returned: int
     dockets_capped: bool
@@ -198,11 +238,36 @@ def hit_to_summary(hit: SearchHit) -> FilingSummary:
     )
 
 
+def detect_nonpublic_counterpart(files: list[FileSummary]) -> tuple[bool, str | None]:
+    """Infer whether a sealed counterpart exists from file naming convention.
+
+    A filer who labels one version "PUBLIC" or "REDACTED" is distinguishing it
+    from a sealed version on the same accession. This is a heuristic signal so a
+    caller knows to move for access; it never exposes protected content.
+    """
+    for item in files:
+        for text in (item.file_name, item.description):
+            candidate = (text or "").strip().lower()
+            if not candidate:
+                continue
+            if any(keyword in candidate for keyword in NONPUBLIC_KEYWORDS):
+                return True, "file_naming_convention"
+            prefix = re.match(NONPUBLIC_PREFIX_RE, candidate)
+            if not prefix:
+                continue
+            remainder = candidate[prefix.end() :]
+            if remainder.startswith(NONPUBLIC_PREFIX_EXCEPTIONS):
+                continue
+            return True, "file_naming_convention"
+    return False, None
+
+
 def hit_to_detail(hit: SearchHit) -> FilingDetail:
     summary = hit_to_summary(hit)
-    return FilingDetail(**summary.model_dump(), affiliations=hit.affiliations)
-
-
-DownloadFormat = Literal["native", "pdf", "zip"]
-MatchMode = Literal["phrase", "all", "any"]
-SearchScope = Literal["description", "full_text", "both"]
+    has_counterpart, basis = detect_nonpublic_counterpart(summary.files)
+    return FilingDetail(
+        **summary.model_dump(),
+        affiliations=hit.affiliations,
+        has_nonpublic_counterpart=has_counterpart,
+        nonpublic_counterpart_basis=basis,
+    )

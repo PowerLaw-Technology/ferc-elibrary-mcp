@@ -87,6 +87,31 @@ SAMPLE_DOCKET_SHEET = {
 }
 
 
+def search_with_files(files: list[dict]) -> dict:
+    """Search response for one hit carrying the given transmittals."""
+    hit = deepcopy(SAMPLE_SEARCH_HIT)
+    hit["transmittals"] = [
+        {
+            "fileId": f.get("fileId", f"FILE{index}"),
+            "fileType": f.get("fileType", "PDF"),
+            "fileFormat": f.get("fileFormat", "PDF"),
+            "fileName": f.get("fileName", ""),
+            "fileDesc": f.get("fileDesc", ""),
+            "fileSize": f.get("fileSize", 1000),
+            "transmittalFk": None,
+        }
+        for index, f in enumerate(files)
+    ]
+    return {
+        "searchHits": [hit],
+        "totalHits": 1,
+        "numHits": 1,
+        "success": True,
+        "errorMessage": None,
+        "searchResultId": None,
+    }
+
+
 def search_with_dockets(docket_numbers: list[str], *, avail: str = "P") -> dict:
     hits = []
     for index, docket in enumerate(docket_numbers):

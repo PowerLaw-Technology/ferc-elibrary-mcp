@@ -26,6 +26,25 @@ DEFAULT_SEARCH_LIMIT = 25
 MAX_SEARCH_LIMIT = 100
 DESCRIPTION_MAX_LEN = 500
 
+DEFAULT_LOOKBACK_DAYS = 60
+
+# eLibrary silently returns zero hits for an unrecognized dateType, so only
+# these verified values may ever reach the wire.
+DATE_FIELD_TYPES = {"filed": "filed_date", "issued": "issued_date"}
+
+# A "PUBLIC"-prefixed or "REDACTED" file name conventionally implies a sealed
+# counterpart on the same accession. Utility names beginning with "Public
+# Service"/"Public Utility" are the obvious false positives.
+NONPUBLIC_PREFIX_RE = r"^\s*public[\s_\-.]+"
+NONPUBLIC_PREFIX_EXCEPTIONS = (
+    "service",
+    "utility",
+    "utilities",
+    "interest",
+    "version of",
+)
+NONPUBLIC_KEYWORDS = ("redacted", "public version", "public copy", "non-ceii")
+
 COLLECT_MAX_DOCKETS = 10
 COLLECT_MAX_FILINGS_PER_DOCKET = 50
 COLLECT_MAX_DOWNLOADS = 10

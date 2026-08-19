@@ -22,7 +22,7 @@ uv sync
 
 | Tool | Purpose |
 | --- | --- |
-| `search_filings` | Keyword, docket, accession, document type, category, and industry search. Public filings only. Defaults to the last 60 filed days. |
+| `search_filings` | Keyword, docket, accession, document type, category, and industry search. Public filings only. See [Date filtering](#date-filtering) for how the date window is chosen. |
 | `get_docket` | Docket sheet: related filings, applicants, accession numbers. |
 | `get_filing` | Metadata for one accession (`YYYYMMDD-NNNN`). |
 | `list_files` | Files attached to an accession (call before downloading). |
@@ -30,6 +30,24 @@ uv sync
 | `collect_related` | Search a term or document type, then group related filings by docket (capped at 10 dockets × 50 filings). Optional downloads: 10 public files, skip over 25 MB. |
 
 Privileged, protected, and CEII documents are refused.
+
+## Date filtering
+
+Date defaults are scope-aware, because a 60-day window layered on a named docket silently hides most of a proceeding:
+
+| Call | Window applied | `date_range_source` |
+| --- | --- | --- |
+| `docket=` or `accession_number=` | none, whole proceeding | `none` |
+| open-ended query, no dates | last 60 days | `default_60_day` |
+| any explicit `start_date`/`end_date` | as given | `explicit` |
+
+Every `search_filings` and `collect_related` response reports `date_range_applied`, `date_range_source`, `date_field_applied`, and `results_may_be_date_limited` — including empty results, since an empty set under an unnoticed default is the case most likely to mislead. Treat `total_hits` as a complete count only when `results_may_be_date_limited` is false.
+
+`date_field` selects which date the range filters on, `filed` (default) or `issued`. Use `issued` for deadline arithmetic: FPA 313(a) rehearing and most Commission-set comment and compliance clocks run from issuance, and the two dates diverge. On `ER26-3176`, accession `20260807-5037` was filed 08/07 but issued 08/06, so a filed-date search for 08/06 misses it. Both are filtered server-side by eLibrary, so paging stays exact.
+
+## Sealed counterparts
+
+`get_filing` and `list_files` report `has_nonpublic_counterpart`, a signal that a sealed, protected, or CEII version likely exists on the same accession — the thing you would move for access to under 18 C.F.R. 388.113. It is inferred from filer naming convention (a file name or description prefixed `PUBLIC`, or containing `REDACTED`), so `nonpublic_counterpart_basis` reports `file_naming_convention` to mark it as heuristic rather than authoritative. Utility names such as "Public Service Company" are excluded to avoid false positives. No protected content is ever returned, and the signal is deliberately absent from `search_filings` results.
 
 ## Search precision
 

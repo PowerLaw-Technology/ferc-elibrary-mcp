@@ -18,6 +18,8 @@ from ferc_elibrary_mcp.exceptions import (
     RestrictedDocumentError,
 )
 from ferc_elibrary_mcp.models import (
+    DateField,
+    DateRangeResolution,
     DocketFiling,
     DocketSheet,
     DownloadFormat,
@@ -208,9 +210,17 @@ class ELibraryClient:
         public_only: bool = True,
         match: MatchMode = "phrase",
         search_in: SearchScope = "both",
-    ) -> tuple[SearchResponse, list[FilingSummary]]:
+        date_field: DateField = "filed",
+    ) -> tuple[SearchResponse, list[FilingSummary], DateRangeResolution]:
         limit = max(1, min(limit, config.MAX_SEARCH_LIMIT))
         page = max(1, page)
+        dates = resolve_date_range(
+            start_date,
+            end_date,
+            docket=docket,
+            accession_number=accession_number,
+            date_field=date_field,
+        )
         payload = self._build_search_payload(
             query=query,
             docket=docket,
@@ -225,6 +235,7 @@ class ELibraryClient:
             public_only=public_only,
             match=match,
             search_in=search_in,
+            dates=dates,
         )
         raw = await self._request_json("POST", "Search/AdvancedSearch", json=payload)
         parsed = SearchResponse.model_validate(raw)
@@ -232,11 +243,11 @@ class ELibraryClient:
             raise ELibraryRequestError(
                 parsed.error_message or "eLibrary search returned success=false"
             )
-        return parsed, [hit_to_summary(hit) for hit in parsed.search_hits]
+        return parsed, [hit_to_summary(hit) for hit in parsed.search_hits], dates
 
     async def get_filing(self, accession_number: str) -> FilingDetail:
         accession_number = accession_number.strip()
-        parsed, _ = await self.search(
+        parsed, _, _dates = await self.search(
             accession_number=accession_number,
             page=1,
             limit=10,
@@ -447,12 +458,13 @@ class ELibraryClient:
         download: bool = False,
         match: MatchMode = "phrase",
         search_in: SearchScope = "both",
+        date_field: DateField = "filed",
         max_dockets: int = config.COLLECT_MAX_DOCKETS,
         max_filings_per_docket: int = config.COLLECT_MAX_FILINGS_PER_DOCKET,
         max_downloads: int = config.COLLECT_MAX_DOWNLOADS,
         max_download_bytes: int = config.MAX_DOWNLOAD_BYTES,
     ) -> RelatedCollection:
-        parsed, _summaries = await self.search(
+        parsed, _summaries, dates = await self.search(
             query=query,
             docket=docket,
             document_type=document_type,
@@ -464,6 +476,7 @@ class ELibraryClient:
             limit=config.MAX_SEARCH_LIMIT,
             match=match,
             search_in=search_in,
+            date_field=date_field,
         )
         docket_numbers = _unique_dockets(parsed.search_hits)
         capped = len(docket_numbers) > max_dockets
@@ -487,6 +500,10 @@ class ELibraryClient:
         return RelatedCollection(
             query=query,
             document_type=document_type,
+            date_range_applied={"start": dates.start, "end": dates.end},
+            date_range_source=dates.source,
+            date_field_applied=dates.field,
+            results_may_be_date_limited=dates.may_be_date_limited,
             search_total_hits=parsed.total_hits,
             dockets_returned=len(groups),
             dockets_capped=capped,
@@ -538,9 +555,16 @@ class ELibraryClient:
         public_only: bool,
         match: MatchMode = "phrase",
         search_in: SearchScope = "both",
+        dates: DateRangeResolution | None = None,
     ) -> dict[str, Any]:
-        start, end = _search_date_range(start_date, end_date, accession_number)
-        all_dates = bool(accession_number) and start_date is None and end_date is None
+        if dates is None:
+            dates = resolve_date_range(
+                start_date,
+                end_date,
+                docket=docket,
+                accession_number=accession_number,
+            )
+        all_dates = dates.source == "none"
         docket_searches: list[dict[str, Any]] = []
         if docket and docket.strip():
             docket_searches = [
@@ -569,7 +593,13 @@ class ELibraryClient:
             "searchDescription": search_in in ("description", "both"),
             "dateSearches": []
             if all_dates
-            else [{"dateType": "filed_date", "startDate": start, "endDate": end}],
+            else [
+                {
+                    "dateType": config.DATE_FIELD_TYPES[dates.field],
+                    "startDate": dates.start,
+                    "endDate": dates.end,
+                }
+            ],
             "availability": ["P"] if public_only else [],
             "affiliations": [],
             "categories": categories,
@@ -589,20 +619,49 @@ class ELibraryClient:
         return payload
 
 
-def _search_date_range(
+def resolve_date_range(
     start_date: str | None,
     end_date: str | None,
-    accession_number: str | None,
-) -> tuple[str, str]:
+    *,
+    docket: str | None = None,
+    accession_number: str | None = None,
+    date_field: DateField = "filed",
+) -> DateRangeResolution:
+    """Decide which date window to apply, and record why.
+
+    A docket or accession number is an intentional scope, so layering a 60-day
+    window on top of it silently hides the bulk of a proceeding. The default
+    window only applies to open-ended queries, and the choice is always
+    reported back so a caller can never mistake a filtered count for a total.
+    """
+    if date_field not in config.DATE_FIELD_TYPES:
+        raise ValueError(
+            f"Unrecognized date_field: {date_field}. "
+            f"Use one of {sorted(config.DATE_FIELD_TYPES)}."
+        )
+
+    if start_date or end_date:
+        today = date.today()
+        start = _parse_iso_date(start_date) if start_date else date(1960, 1, 1)
+        end = _parse_iso_date(end_date) if end_date else today
+        return DateRangeResolution(
+            start=start.isoformat(),
+            end=end.isoformat(),
+            source="explicit",
+            field=date_field,
+        )
+
+    if (docket and docket.strip()) or (accession_number and accession_number.strip()):
+        return DateRangeResolution(source="none", field=date_field)
+
     today = date.today()
-    end = _parse_iso_date(end_date) if end_date else today
-    if start_date:
-        start = _parse_iso_date(start_date)
-    elif accession_number:
-        start = date(1960, 1, 1)
-    else:
-        start = today - timedelta(days=60)
-    return start.isoformat(), end.isoformat()
+    start = today - timedelta(days=config.DEFAULT_LOOKBACK_DAYS)
+    return DateRangeResolution(
+        start=start.isoformat(),
+        end=today.isoformat(),
+        source="default_60_day",
+        field=date_field,
+    )
 
 
 def _docket_date_range(
@@ -689,7 +748,9 @@ def _parse_iso_date(value: str) -> date:
             return datetime.strptime(value, fmt).date()
         except ValueError:
             continue
-    raise ValueError(f"Unrecognized date: {value}. Use YYYY-MM-DD.")
+    raise ValueError(
+        f"Unrecognized date: {value}. Use YYYY-MM-DD or MM/DD/YYYY."
+    )
 
 
 def _safe_name(name: str) -> str:

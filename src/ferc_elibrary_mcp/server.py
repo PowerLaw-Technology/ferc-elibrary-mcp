@@ -8,7 +8,12 @@ from fastmcp.exceptions import ToolError
 from ferc_elibrary_mcp import config
 from ferc_elibrary_mcp.client import ELibraryClient
 from ferc_elibrary_mcp.exceptions import ELibraryError
-from ferc_elibrary_mcp.models import DownloadFormat, MatchMode, SearchScope
+from ferc_elibrary_mcp.models import (
+    DateField,
+    DownloadFormat,
+    MatchMode,
+    SearchScope,
+)
 
 mcp = FastMCP(
     name="ferc-elibrary",
@@ -65,13 +70,26 @@ async def search_filings(
     limit: int = config.DEFAULT_SEARCH_LIMIT,
     match: MatchMode = "phrase",
     search_in: SearchScope = "both",
+    date_field: DateField = "filed",
 ) -> dict[str, Any]:
-    """Search public FERC eLibrary filings.
+    """Search public FERC eLibrary filings. Public documents only.
 
     Use for keyword/term search, docket prefix (CP, ER11-4046), accession numbers,
     or document types such as Order/Opinion, Comments/Protest, or
-    Application/Petition/Request. Defaults to the last 60 filed days and public
-    documents only.
+    Application/Petition/Request.
+
+    Date defaulting: when docket or accession_number is supplied, no date filter
+    is applied and the whole proceeding is searched. For an open-ended query with
+    no dates, the last 60 days is used to keep the result set manageable.
+    Every response reports date_range_applied, date_range_source
+    (explicit/default_60_day/none), and results_may_be_date_limited, so check
+    those before treating total_hits as a complete count.
+
+    date_field selects which date start_date and end_date filter on. Use
+    "issued" when computing deadlines: FPA 313(a) rehearing and most
+    Commission-set comment and compliance clocks run from issuance, not from the
+    filed date, and the two differ. Orders are generally best searched by
+    issuance.
 
     match controls how a multi-word query is interpreted. "phrase" (default)
     requires the exact phrase and is what you want when looking for a named
@@ -87,7 +105,7 @@ async def search_filings(
     it is forwarded unchanged.
     """
     try:
-        parsed, hits = await get_client().search(
+        parsed, hits, dates = await get_client().search(
             query=query,
             docket=docket,
             accession_number=accession_number,
@@ -100,6 +118,7 @@ async def search_filings(
             limit=limit,
             match=match,
             search_in=search_in,
+            date_field=date_field,
         )
     except Exception as exc:
         _tool_error(exc)
@@ -110,6 +129,7 @@ async def search_filings(
         "limit": min(max(limit, 1), config.MAX_SEARCH_LIMIT),
         "match": match,
         "search_in": search_in,
+        **dates.as_envelope(),
         "hits": [_dump(hit) for hit in hits],
     }
 
@@ -145,7 +165,15 @@ async def get_docket(
 
 @mcp.tool
 async def get_filing(accession_number: str) -> dict[str, Any]:
-    """Fetch metadata for one filing by accession number (YYYYMMDD-NNNN)."""
+    """Fetch metadata for one filing by accession number (YYYYMMDD-NNNN).
+
+    has_nonpublic_counterpart signals that a sealed, protected, or CEII version
+    likely exists on the same accession, which is what you would move for access
+    to under 18 C.F.R. 388.113. It is inferred from filer naming convention
+    ("PUBLIC" or "REDACTED" in a file name), so nonpublic_counterpart_basis
+    reports it as file_naming_convention rather than authoritative metadata. No
+    protected content is ever returned.
+    """
     try:
         filing = await get_client().get_filing(accession_number)
     except Exception as exc:
@@ -156,7 +184,10 @@ async def get_filing(accession_number: str) -> dict[str, Any]:
 
 @mcp.tool
 async def list_files(accession_number: str) -> dict[str, Any]:
-    """List files attached to an accession. Call this before download_file."""
+    """List files attached to an accession. Call this before download_file.
+
+    See get_filing for what has_nonpublic_counterpart means.
+    """
     try:
         filing = await get_client().list_files(accession_number)
     except Exception as exc:
@@ -166,6 +197,8 @@ async def list_files(accession_number: str) -> dict[str, Any]:
         "accession_number": filing.accession_number,
         "availability": filing.availability,
         "url": filing.url,
+        "has_nonpublic_counterpart": filing.has_nonpublic_counterpart,
+        "nonpublic_counterpart_basis": filing.nonpublic_counterpart_basis,
         "files": [_dump(item) for item in filing.files],
     }
 
@@ -211,12 +244,18 @@ async def collect_related(
     download: bool = False,
     match: MatchMode = "phrase",
     search_in: SearchScope = "both",
+    date_field: DateField = "filed",
 ) -> dict[str, Any]:
     """Search a term or document type, then list related filings by docket.
 
-    Caps results at 10 dockets and 50 filings per docket. If download is true,
-    saves up to 10 public files under 25 MB each. match and search_in behave as
-    in search_filings; narrow them before turning downloads on.
+    Caps results at 10 dockets and 50 filings per docket, and reports
+    dockets_capped plus filings_capped_per_docket so truncation is visible. If
+    download is true, saves up to 10 public files under 25 MB each.
+
+    match, search_in, date_field, and the date-defaulting rules behave as in
+    search_filings: supplying docket skips the 60-day default, and the response
+    reports date_range_applied, date_range_source, and
+    results_may_be_date_limited. Narrow the query before turning downloads on.
     """
     try:
         collection = await get_client().collect_related(
@@ -230,6 +269,7 @@ async def collect_related(
             download=download,
             match=match,
             search_in=search_in,
+            date_field=date_field,
         )
     except Exception as exc:
         _tool_error(exc)
