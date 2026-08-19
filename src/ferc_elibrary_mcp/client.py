@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 import re
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 
@@ -22,9 +24,11 @@ from ferc_elibrary_mcp.models import (
     DownloadResult,
     FilingDetail,
     FilingSummary,
+    MatchMode,
     RelatedCollection,
     SearchHit,
     SearchResponse,
+    SearchScope,
     Transmittal,
     file_list_url,
     hit_to_detail,
@@ -91,6 +95,50 @@ class ELibraryClient:
                 await asyncio.sleep(wait)
             self._last_request = time.monotonic()
 
+    async def _send(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        content: bytes | str | None = None,
+        params: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> httpx.Response:
+        """Send one request, retrying the proxy errors eLibrary throws at random."""
+        client = self._ensure_http()
+        last_status: int | None = None
+        for attempt in range(config.MAX_RETRIES):
+            await self._throttle()
+            try:
+                response = await client.request(
+                    method,
+                    path,
+                    json=json,
+                    content=content,
+                    params=params,
+                    timeout=timeout,
+                )
+            except httpx.HTTPError as exc:
+                if attempt == config.MAX_RETRIES - 1:
+                    raise ELibraryRequestError(
+                        f"eLibrary request failed: {exc}"
+                    ) from exc
+                await asyncio.sleep(config.RETRY_BACKOFF_SECONDS * (attempt + 1))
+                continue
+
+            if response.status_code not in config.RETRY_STATUS_CODES:
+                return response
+
+            last_status = response.status_code
+            if attempt < config.MAX_RETRIES - 1:
+                await asyncio.sleep(config.RETRY_BACKOFF_SECONDS * (attempt + 1))
+
+        raise ELibraryRequestError(
+            f"eLibrary returned HTTP {last_status} for {path} after "
+            f"{config.MAX_RETRIES} attempts"
+        )
+
     async def _request_json(
         self,
         method: str,
@@ -101,30 +149,22 @@ class ELibraryClient:
         params: dict[str, str] | None = None,
         timeout: float | None = None,
     ) -> Any:
-        await self._throttle()
-        client = self._ensure_http()
-        try:
-            response = await client.request(
-                method,
-                path,
-                json=json,
-                content=content,
-                params=params,
-                timeout=timeout,
-            )
-        except httpx.HTTPError as exc:
-            raise ELibraryRequestError(f"eLibrary request failed: {exc}") from exc
+        response = await self._send(
+            method, path, json=json, content=content, params=params, timeout=timeout
+        )
 
         if response.status_code >= 400:
+            detail = _ferc_error_detail(response)
             raise ELibraryRequestError(
-                f"eLibrary returned HTTP {response.status_code} for {path}"
+                f"eLibrary returned HTTP {response.status_code} for {path}{detail}"
             )
         try:
-            return response.json()
+            payload = response.json()
         except ValueError as exc:
             raise ELibraryRequestError(
                 f"eLibrary returned non-JSON for {path}: {response.text[:200]}"
             ) from exc
+        return payload
 
     async def _request_bytes(
         self,
@@ -134,26 +174,23 @@ class ELibraryClient:
         json: Any = None,
         content: bytes | str | None = None,
         params: dict[str, str] | None = None,
-    ) -> tuple[bytes, str]:
-        await self._throttle()
-        client = self._ensure_http()
-        try:
-            response = await client.request(
-                method,
-                path,
-                json=json,
-                content=content,
-                params=params,
-                timeout=config.DOWNLOAD_TIMEOUT,
-            )
-        except httpx.HTTPError as exc:
-            raise ELibraryRequestError(f"eLibrary download failed: {exc}") from exc
+    ) -> tuple[bytes, str | None]:
+        """Return the body and the server-suggested filename, if any."""
+        response = await self._send(
+            method,
+            path,
+            json=json,
+            content=content,
+            params=params,
+            timeout=config.DOWNLOAD_TIMEOUT,
+        )
         if response.status_code >= 400:
+            detail = _ferc_error_detail(response)
             raise ELibraryRequestError(
-                f"eLibrary returned HTTP {response.status_code} for {path}"
+                f"eLibrary returned HTTP {response.status_code} for {path}{detail}"
             )
-        content_type = response.headers.get("content-type", "application/octet-stream")
-        return response.content, content_type.split(";")[0].strip()
+        disposition = response.headers.get("content-disposition", "")
+        return response.content, _filename_from_disposition(disposition)
 
     async def search(
         self,
@@ -169,6 +206,8 @@ class ELibraryClient:
         page: int = 1,
         limit: int = config.DEFAULT_SEARCH_LIMIT,
         public_only: bool = True,
+        match: MatchMode = "phrase",
+        search_in: SearchScope = "both",
     ) -> tuple[SearchResponse, list[FilingSummary]]:
         limit = max(1, min(limit, config.MAX_SEARCH_LIMIT))
         page = max(1, page)
@@ -184,11 +223,15 @@ class ELibraryClient:
             page=page,
             limit=limit,
             public_only=public_only,
+            match=match,
+            search_in=search_in,
         )
         raw = await self._request_json("POST", "Search/AdvancedSearch", json=payload)
         parsed = SearchResponse.model_validate(raw)
-        if parsed.error_message:
-            raise ELibraryRequestError(str(parsed.error_message))
+        if parsed.error_message or parsed.success is False:
+            raise ELibraryRequestError(
+                parsed.error_message or "eLibrary search returned success=false"
+            )
         return parsed, [hit_to_summary(hit) for hit in parsed.search_hits]
 
     async def get_filing(self, accession_number: str) -> FilingDetail:
@@ -224,9 +267,18 @@ class ELibraryClient:
         limit = max(1, min(limit, config.MAX_SEARCH_LIMIT))
         page = max(0, page)
         start, end = _docket_date_range(start_date, end_date)
+        parent, extracted_sub = split_docket_number(docket_number)
+        if subdockets and subdockets != "All":
+            sub = subdockets
+        elif extracted_sub and subdockets == "All":
+            # Parent + All returns the related sheet; parent-000 as the docket id
+            # is treated as a literal and comes back empty.
+            sub = "All"
+        else:
+            sub = subdockets or "All"
         payload = {
-            "dockets": docket_number,
-            "subdockets": subdockets or "All",
+            "dockets": parent,
+            "subdockets": sub,
             "filed_date_beg": start,
             "filed_date_end": end,
             "complete_flag": 0,
@@ -236,7 +288,7 @@ class ELibraryClient:
         raw = await self._request_json(
             "POST", "Docket/GetSingleDocketSheet", json=payload
         )
-        return _parse_docket_sheet(docket_number, raw, page=page, page_size=limit)
+        return _parse_docket_sheet(parent, raw, page=page, page_size=limit)
 
     async def download_file(
         self,
@@ -258,20 +310,45 @@ class ELibraryClient:
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         if format == "pdf":
-            body, content_type = await self._request_bytes(
+            body, suggested = await self._request_bytes(
                 "POST",
                 "File/DownloadPDF",
                 params={"accessionNumber": accession_number},
                 content='{serverLocation: ""}',
             )
-            filename = f"{accession_number}.pdf"
+            filename = _safe_name(suggested or "") or f"{accession_number}.pdf"
             return self._write_download(
                 dest_dir / filename,
                 body,
-                content_type or "application/pdf",
                 accession_number,
                 filename,
                 max_bytes=max_bytes,
+                is_bundle=True,
+            )
+
+        if format == "zip":
+            # A non-empty "accession" makes eLibrary zip every file on the
+            # accession instead of serving the one requested.
+            body, suggested = await self._request_bytes(
+                "POST",
+                "File/DownloadP8File",
+                json={
+                    "FileType": "",
+                    "accession": accession_number,
+                    "fileid": 0,
+                    "FileIDAll": "",
+                    "fileidLst": [f.file_id for f in filing.files if f.file_id],
+                    "Islegacy": False,
+                },
+            )
+            filename = _safe_name(suggested or "") or f"{accession_number}.zip"
+            return self._write_download(
+                dest_dir / filename,
+                body,
+                accession_number,
+                filename,
+                max_bytes=max_bytes,
+                is_bundle=True,
             )
 
         transmittal = _select_transmittal(filing, file_id)
@@ -280,47 +357,55 @@ class ELibraryClient:
                 accession_number=accession_number,
                 path="",
                 size=transmittal.file_size,
-                content_type=transmittal.file_type or "application/octet-stream",
+                content_type=guess_content_type(b"", transmittal.file_name),
                 file_name=transmittal.file_name,
                 url=file_list_url(accession_number),
+                expected_size=transmittal.file_size,
                 skipped=True,
                 skip_reason=f"File is {transmittal.file_size} bytes, over the {max_bytes} byte cap",
             )
 
-        body, content_type = await self._request_bytes(
+        body, suggested = await self._request_bytes(
             "POST",
             "File/DownloadP8File",
             json={
                 "FileType": transmittal.file_type or transmittal.file_format or "",
-                "accession": accession_number,
+                "accession": "",
                 "fileid": 0,
                 "FileIDAll": "",
                 "fileidLst": [transmittal.file_id],
                 "Islegacy": False,
             },
         )
-        filename = _safe_name(transmittal.file_name) or f"{transmittal.file_id}.bin"
+        filename = (
+            _safe_name(suggested or "")
+            or _safe_name(transmittal.file_name)
+            or f"{transmittal.file_id}.bin"
+        )
         if "." not in filename and transmittal.file_format:
             filename = f"{filename}.{transmittal.file_format.lower()}"
         return self._write_download(
             dest_dir / filename,
             body,
-            content_type,
             accession_number,
             filename,
             max_bytes=max_bytes,
+            expected_size=transmittal.file_size or None,
         )
 
     def _write_download(
         self,
         path: Path,
         body: bytes,
-        content_type: str,
         accession_number: str,
         file_name: str,
         *,
         max_bytes: int,
+        is_bundle: bool = False,
+        expected_size: int | None = None,
     ) -> DownloadResult:
+        content_type = guess_content_type(body, file_name)
+        bundle = is_bundle or content_type == "application/zip"
         if len(body) > max_bytes:
             return DownloadResult(
                 accession_number=accession_number,
@@ -329,6 +414,8 @@ class ELibraryClient:
                 content_type=content_type,
                 file_name=file_name,
                 url=file_list_url(accession_number),
+                is_bundle=bundle,
+                expected_size=expected_size,
                 skipped=True,
                 skip_reason=f"Downloaded payload is {len(body)} bytes, over the {max_bytes} byte cap",
             )
@@ -340,6 +427,11 @@ class ELibraryClient:
             content_type=content_type,
             file_name=file_name,
             url=file_list_url(accession_number),
+            is_bundle=bundle,
+            expected_size=expected_size,
+            size_matches_metadata=(
+                None if expected_size is None else len(body) == expected_size
+            ),
         )
 
     async def collect_related(
@@ -353,6 +445,8 @@ class ELibraryClient:
         start_date: str | None = None,
         end_date: str | None = None,
         download: bool = False,
+        match: MatchMode = "phrase",
+        search_in: SearchScope = "both",
         max_dockets: int = config.COLLECT_MAX_DOCKETS,
         max_filings_per_docket: int = config.COLLECT_MAX_FILINGS_PER_DOCKET,
         max_downloads: int = config.COLLECT_MAX_DOWNLOADS,
@@ -368,6 +462,8 @@ class ELibraryClient:
             end_date=end_date,
             page=1,
             limit=config.MAX_SEARCH_LIMIT,
+            match=match,
+            search_in=search_in,
         )
         docket_numbers = _unique_dockets(parsed.search_hits)
         capped = len(docket_numbers) > max_dockets
@@ -440,19 +536,19 @@ class ELibraryClient:
         page: int,
         limit: int,
         public_only: bool,
+        match: MatchMode = "phrase",
+        search_in: SearchScope = "both",
     ) -> dict[str, Any]:
         start, end = _search_date_range(start_date, end_date, accession_number)
         all_dates = bool(accession_number) and start_date is None and end_date is None
-        docket_searches: list[dict[str, Any]]
-        if docket:
+        docket_searches: list[dict[str, Any]] = []
+        if docket and docket.strip():
             docket_searches = [
                 {"docketNumber": docket.strip(), "subDocketNumbers": []}
             ]
-        else:
-            docket_searches = [{"docketNumber": None, "subDocketNumbers": []}]
 
         class_types: list[dict[str, str]] = []
-        if document_type:
+        if document_type and document_type.strip():
             class_types = [
                 {"documentClass": document_type.strip(), "documentType": ""}
             ]
@@ -468,17 +564,16 @@ class ELibraryClient:
             libraries = [config.INDUSTRY_ALIASES.get(key, industry.strip())]
 
         payload: dict[str, Any] = {
-            "searchText": (query or "").strip() or "*",
-            "searchFullText": True,
-            "searchDescription": True,
+            "searchText": build_search_text(query, match),
+            "searchFullText": search_in in ("full_text", "both"),
+            "searchDescription": search_in in ("description", "both"),
             "dateSearches": []
             if all_dates
             else [{"dateType": "filed_date", "startDate": start, "endDate": end}],
-            "availability": ["P"] if public_only else None,
+            "availability": ["P"] if public_only else [],
             "affiliations": [],
             "categories": categories,
             "libraries": libraries,
-            "accessionNumber": accession_number.strip() if accession_number else None,
             "eFiling": False,
             "docketSearches": docket_searches,
             "resultsPerPage": limit,
@@ -489,6 +584,8 @@ class ELibraryClient:
             "idolResultID": "",
             "allDates": all_dates,
         }
+        if accession_number and accession_number.strip():
+            payload["accessionNumber"] = accession_number.strip()
         return payload
 
 
@@ -515,6 +612,72 @@ def _docket_date_range(
     end = _parse_iso_date(end_date) if end_date else today
     start = _parse_iso_date(start_date) if start_date else date(1960, 1, 1)
     return start.strftime("%m-%d-%Y"), end.strftime("%m-%d-%Y")
+
+
+def build_search_text(query: str | None, match: MatchMode) -> str:
+    """Turn a plain query into eLibrary search syntax.
+
+    eLibrary treats bare multi-word text as independent terms, which buries the
+    filings that actually contain the phrase. Quoting collapses it to a phrase
+    search; "all" requires every term.
+    """
+    text = (query or "").strip()
+    if not text:
+        return "*"
+    if match == "any":
+        return text
+    # Respect syntax the caller wrote themselves.
+    if '"' in text or any(
+        op in text for op in (" AND ", " OR ", " NOT ", " NEAR ")
+    ):
+        return text
+    terms = text.split()
+    if len(terms) == 1:
+        return text
+    if match == "all":
+        return " AND ".join(terms)
+    return f'"{text}"'
+
+
+def guess_content_type(body: bytes, file_name: str = "") -> str:
+    """eLibrary always claims octet-stream, so sniff the bytes, then the name."""
+    for magic, content_type in config.MAGIC_CONTENT_TYPES:
+        if body.startswith(magic):
+            return content_type
+    suffix = Path(file_name).suffix.lower()
+    if suffix in config.EXTENSION_CONTENT_TYPES:
+        return config.EXTENSION_CONTENT_TYPES[suffix]
+    guessed, _ = mimetypes.guess_type(file_name or "file")
+    return guessed or "application/octet-stream"
+
+
+def _filename_from_disposition(disposition: str) -> str | None:
+    if not disposition:
+        return None
+    match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', disposition)
+    if not match:
+        return None
+    return unquote(match.group(1)).strip() or None
+
+
+def split_docket_number(number: str) -> tuple[str, str | None]:
+    """Split ER26-3178-000 into (ER26-3178, 000). Leave CP21-470 unchanged."""
+    number = number.strip()
+    parts = number.split("-")
+    if len(parts) >= 3 and parts[-1].isdigit():
+        return "-".join(parts[:-1]), parts[-1]
+    return number, None
+
+
+def _ferc_error_detail(response: httpx.Response) -> str:
+    try:
+        data = response.json()
+    except ValueError:
+        text = response.text[:200]
+        return f": {text}" if text else ""
+    if isinstance(data, dict) and data.get("errorMessage"):
+        return f": {data['errorMessage']}"
+    return ""
 
 
 def _parse_iso_date(value: str) -> date:

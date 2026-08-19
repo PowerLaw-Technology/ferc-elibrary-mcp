@@ -134,6 +134,9 @@ class DownloadResult(BaseModel):
     content_type: str
     file_name: str
     url: str
+    is_bundle: bool = False
+    expected_size: int | None = None
+    size_matches_metadata: bool | None = None
     skipped: bool = False
     skip_reason: str | None = None
 
@@ -200,4 +203,6 @@ def hit_to_detail(hit: SearchHit) -> FilingDetail:
     return FilingDetail(**summary.model_dump(), affiliations=hit.affiliations)
 
 
-DownloadFormat = Literal["native", "pdf"]
+DownloadFormat = Literal["native", "pdf", "zip"]
+MatchMode = Literal["phrase", "all", "any"]
+SearchScope = Literal["description", "full_text", "both"]

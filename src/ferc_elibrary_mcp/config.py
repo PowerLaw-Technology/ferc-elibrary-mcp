@@ -13,6 +13,11 @@ CONNECT_TIMEOUT = 10.0
 
 RATE_LIMIT_SECONDS = float(os.environ.get("FERC_RATE_LIMIT_SECONDS", "0.5"))
 
+# eLibrary sits behind a proxy that intermittently returns 502/503/520.
+RETRY_STATUS_CODES = frozenset({500, 502, 503, 504, 520, 521, 522, 524})
+MAX_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 1.0
+
 DEFAULT_DOWNLOAD_DIR = Path(
     os.environ.get("FERC_DOWNLOAD_DIR", str(Path.home() / "Downloads" / "ferc-elibrary"))
 )
@@ -46,4 +51,30 @@ INDUSTRY_ALIASES = {
 CATEGORY_ALIASES = {
     "issuance": "Issuance",
     "submittal": "Submittal",
+}
+
+# eLibrary serves every download as application/octet-stream, so the real type
+# has to be inferred from magic bytes or the file extension.
+MAGIC_CONTENT_TYPES: tuple[tuple[bytes, str], ...] = (
+    (b"%PDF", "application/pdf"),
+    (b"PK\x03\x04", "application/zip"),
+    (b"\xd0\xcf\x11\xe0", "application/vnd.ms-office"),
+    (b"II*\x00", "image/tiff"),
+    (b"MM\x00*", "image/tiff"),
+    (b"\x89PNG", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+)
+
+EXTENSION_CONTENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".zip": "application/zip",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".txt": "text/plain",
+    ".csv": "text/csv",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    ".rtf": "application/rtf",
 }

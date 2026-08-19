@@ -8,7 +8,7 @@ from fastmcp.exceptions import ToolError
 from ferc_elibrary_mcp import config
 from ferc_elibrary_mcp.client import ELibraryClient
 from ferc_elibrary_mcp.exceptions import ELibraryError
-from ferc_elibrary_mcp.models import DownloadFormat
+from ferc_elibrary_mcp.models import DownloadFormat, MatchMode, SearchScope
 
 mcp = FastMCP(
     name="ferc-elibrary",
@@ -63,6 +63,8 @@ async def search_filings(
     end_date: str | None = None,
     page: int = 1,
     limit: int = config.DEFAULT_SEARCH_LIMIT,
+    match: MatchMode = "phrase",
+    search_in: SearchScope = "both",
 ) -> dict[str, Any]:
     """Search public FERC eLibrary filings.
 
@@ -70,6 +72,19 @@ async def search_filings(
     or document types such as Order/Opinion, Comments/Protest, or
     Application/Petition/Request. Defaults to the last 60 filed days and public
     documents only.
+
+    match controls how a multi-word query is interpreted. "phrase" (default)
+    requires the exact phrase and is what you want when looking for a named
+    agreement or document. "all" requires every term anywhere. "any" is FERC's
+    loose term matching, which returns high volume and low precision.
+
+    search_in controls where the query is matched. "both" (default) covers
+    descriptions and full document text. "description" is far more precise
+    because it matches the filing title rather than any passing mention deep in
+    an attachment. Use it when a phrase search still returns too much noise.
+
+    You may also pass eLibrary syntax directly (quotes, AND, OR, NOT, NEAR);
+    it is forwarded unchanged.
     """
     try:
         parsed, hits = await get_client().search(
@@ -83,6 +98,8 @@ async def search_filings(
             end_date=end_date,
             page=page,
             limit=limit,
+            match=match,
+            search_in=search_in,
         )
     except Exception as exc:
         _tool_error(exc)
@@ -91,6 +108,8 @@ async def search_filings(
         "total_hits": parsed.total_hits,
         "page": page,
         "limit": min(max(limit, 1), config.MAX_SEARCH_LIMIT),
+        "match": match,
+        "search_in": search_in,
         "hits": [_dump(hit) for hit in hits],
     }
 
@@ -160,8 +179,15 @@ async def download_file(
     """Download a public eLibrary file to FERC_DOWNLOAD_DIR.
 
     Does not return file bytes. Privileged, protected, and CEII documents are
-    refused. format=native saves the original file; format=pdf asks eLibrary to
-    generate a combined PDF for the accession.
+    refused. Call list_files first to pick a file_id.
+
+    format=native saves that one original file and is the default. format=zip
+    bundles every file on the accession into one archive. format=pdf asks
+    eLibrary to generate a combined PDF of the whole accession.
+
+    The result reports expected_size from FERC's metadata alongside the byte
+    count actually written, plus size_matches_metadata and is_bundle, so a
+    mismatch between the file you asked for and the artifact you got is visible.
     """
     try:
         result = await get_client().download_file(
@@ -183,11 +209,14 @@ async def collect_related(
     start_date: str | None = None,
     end_date: str | None = None,
     download: bool = False,
+    match: MatchMode = "phrase",
+    search_in: SearchScope = "both",
 ) -> dict[str, Any]:
     """Search a term or document type, then list related filings by docket.
 
     Caps results at 10 dockets and 50 filings per docket. If download is true,
-    saves up to 10 public files under 25 MB each.
+    saves up to 10 public files under 25 MB each. match and search_in behave as
+    in search_filings; narrow them before turning downloads on.
     """
     try:
         collection = await get_client().collect_related(
@@ -199,6 +228,8 @@ async def collect_related(
             start_date=start_date,
             end_date=end_date,
             download=download,
+            match=match,
+            search_in=search_in,
         )
     except Exception as exc:
         _tool_error(exc)
