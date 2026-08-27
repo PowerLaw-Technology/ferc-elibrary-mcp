@@ -2,9 +2,10 @@
 
 ## Unreleased
 
+## 0.1.1 — 2026-08-27
+
 - Expand unexpanded MCPB placeholders (`${HOME}`, `~`, `${DOWNLOADS}`) in `FERC_DOWNLOAD_DIR` so Claude Desktop downloads land in the real Downloads folder
 - `download_bundle` skips accessions omitted from public search (privileged/CEII) instead of aborting the batch with a "not found" error
-- Claude Desktop one-click install via an MCP Bundle (`manifest.json`, `mcpb pack`)
 
 ## 0.1.0 — 2026-08-26
 

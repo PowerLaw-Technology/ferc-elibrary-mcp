@@ -6,7 +6,7 @@ from pathlib import Path
 
 BASE_URL = "https://elibrary.ferc.gov/eLibrarywebapi/api/"
 ELIBRARY_UI_BASE = "https://elibrary.ferc.gov/eLibrary"
-USER_AGENT = "ferc-elibrary-mcp/0.1.0 (public eLibrary research)"
+USER_AGENT = "ferc-elibrary-mcp/0.1.1 (public eLibrary research)"
 
 SEARCH_TIMEOUT = 30.0
 DOWNLOAD_TIMEOUT = 120.0
