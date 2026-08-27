@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "ferc-elibrary",
   "display_name": "FERC eLibrary",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Search and download public FERC eLibrary filings from Claude Desktop.",
   "long_description": "Search the public FERC eLibrary, inspect docket sheets, and save public filings to a folder on this computer.\n\n**Public documents only** — no FERC login, and no CEII, privileged, or protected content. Downloads are written to the folder you choose (default: `Downloads/ferc-elibrary`), not returned in the chat.\n\nAsk Claude in plain language, for example:\n- Search eLibrary for comments about a project\n- Pull the docket sheet for CP21-470\n- Download the public PDF for an accession number\n\nFERC does not publish an official developer API. This extension uses the same public website backend, which can change without notice.",
   "author": {

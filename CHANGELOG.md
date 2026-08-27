@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.2 — 2026-08-27
+
 - `download_file(format=zip)` unwraps single-member archives and refreshes `content_type` / `is_bundle` / `expected_size` for the saved file (including bare `.docx` OOXML)
 - Prefer OOXML extensions over ZIP magic when sniffing content types
 - `download_bundle.skipped_accessions` now includes `reason` and `category` (`restricted` vs `not_found`)

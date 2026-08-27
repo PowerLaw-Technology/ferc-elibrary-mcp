@@ -1,6 +1,6 @@
 [project]
 name = "ferc-elibrary-mcp"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server and Python library for searching and downloading public FERC eLibrary filings."
 readme = "README.md"
 license = "MIT"
