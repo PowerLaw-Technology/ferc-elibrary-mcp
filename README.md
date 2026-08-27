@@ -10,14 +10,37 @@ FERC does not publish an official eLibrary developer API. This project talks to 
 - Be polite about rate limits; the client spaces requests by default
 - Use this for research against publicly available filings, not as a substitute for official access procedures
 
+## Install in Claude Desktop (easiest)
+
+No Python, terminal, or JSON. Claude Desktop installs the server for you.
+
+1. Install [Claude Desktop](https://claude.ai/download).
+2. Download `ferc-elibrary.mcpb` from the [latest GitHub Release](https://github.com/PowerLaw-Technology/ferc-elibrary-mcp/releases/latest).
+3. Double-click the file, or drag it into Claude Desktop → **Settings → Extensions**.
+4. Click **Install**. Leave the download folder as-is unless you want PDFs somewhere else.
+5. Ask Claude in plain language, for example:
+   - Search eLibrary for comments and protests about the Ashokan pumped storage project in the last year.
+   - Pull the docket sheet for CP21-470 and list related filings.
+   - Download the public PDF for accession 20201119-5202.
+
+The first launch may take a minute while Claude installs Python via [uv](https://docs.astral.sh/uv/). After that it starts quickly. Downloaded files go in `Downloads/ferc-elibrary` (or the folder you picked). Public filings only.
+
+If a release is not up yet, a maintainer can build the same file with:
+
+```bash
+npx --yes @anthropic-ai/mcpb pack . dist/ferc-elibrary.mcpb
+```
+
+Then email or AirDrop `dist/ferc-elibrary.mcpb`.
+
 ## Requirements
 
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/) (for install and MCP launch)
+- **Claude Desktop extension:** none on your machine (Claude manages Python via uv)
+- **uvx / library / contributors:** Python 3.12+ and [uv](https://docs.astral.sh/uv/)
 
 ## Install
 
-### End users (MCP clients)
+### End users (other MCP clients)
 
 No clone required. Clients launch the server with `uvx` from git (see [MCP client configuration](#mcp-client-configuration)). Replace `OWNER` with the GitHub owner once the repo is published:
 
@@ -134,7 +157,20 @@ For **many files or many accessions**, use `download_bundle` instead. It calls t
 
 eLibrary labels every download `application/octet-stream`, so the real type is inferred from magic bytes and the file extension. Single-file results also report `expected_size` from FERC's metadata next to the bytes actually written, plus `size_matches_metadata` and `is_bundle`, so receiving a bundle when you asked for one file is visible rather than silent.
 
+## Build the Claude Desktop bundle
+
+From a clone, with Node.js 18+ available:
+
+```bash
+npx --yes @anthropic-ai/mcpb validate manifest.json
+npx --yes @anthropic-ai/mcpb pack . dist/ferc-elibrary.mcpb
+```
+
+The bundle uses `server.type = "uv"`: it ships source and `pyproject.toml`, not a vendored virtualenv. Claude Desktop downloads Python and dependencies on first run. CI packs the same file on every push and attaches it to GitHub Releases.
+
 ## MCP client configuration
+
+Claude Desktop users should prefer the [one-click `.mcpb` install](#install-in-claude-desktop-easiest). The JSON below is for Cursor, Claude Code, and other clients.
 
 Replace `OWNER` with the GitHub owner of this repository. All snippets use portable `uvx` from git — no absolute machine paths.
 

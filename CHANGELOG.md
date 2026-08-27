@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Claude Desktop one-click install via an MCP Bundle (`manifest.json`, `mcpb pack`)
+
 ## 0.1.0 — 2026-08-26
 
 Initial release: MCP server and async Python client for the public FERC eLibrary JSON API.

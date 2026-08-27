@@ -1,0 +1,116 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/refs/heads/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "ferc-elibrary",
+  "display_name": "FERC eLibrary",
+  "version": "0.1.0",
+  "description": "Search and download public FERC eLibrary filings from Claude Desktop.",
+  "long_description": "Search the public FERC eLibrary, inspect docket sheets, and save public filings to a folder on this computer.\n\n**Public documents only** — no FERC login, and no CEII, privileged, or protected content. Downloads are written to the folder you choose (default: `Downloads/ferc-elibrary`), not returned in the chat.\n\nAsk Claude in plain language, for example:\n- Search eLibrary for comments about a project\n- Pull the docket sheet for CP21-470\n- Download the public PDF for an accession number\n\nFERC does not publish an official developer API. This extension uses the same public website backend, which can change without notice.",
+  "author": {
+    "name": "zoschin",
+    "email": "zachoschin@gmail.com",
+    "url": "https://github.com/PowerLaw-Technology/ferc-elibrary-mcp"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PowerLaw-Technology/ferc-elibrary-mcp"
+  },
+  "homepage": "https://github.com/PowerLaw-Technology/ferc-elibrary-mcp",
+  "documentation": "https://github.com/PowerLaw-Technology/ferc-elibrary-mcp#readme",
+  "support": "https://github.com/PowerLaw-Technology/ferc-elibrary-mcp/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "uv",
+    "entry_point": "src/ferc_elibrary_mcp/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "${__dirname}",
+        "ferc-elibrary-mcp"
+      ],
+      "env": {
+        "FERC_DOWNLOAD_DIR": "${user_config.download_dir}",
+        "FERC_MCP_IDLE_TIMEOUT_SECONDS": "14400"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "search_filings",
+      "description": "Search public FERC eLibrary filings by keyword, docket, accession, document type, category, or industry."
+    },
+    {
+      "name": "get_docket",
+      "description": "Fetch a docket sheet: related filings, applicants, and accession numbers."
+    },
+    {
+      "name": "get_filing",
+      "description": "Fetch metadata for one accession (YYYYMMDD-NNNN)."
+    },
+    {
+      "name": "list_files",
+      "description": "List files attached to an accession. Call before downloading."
+    },
+    {
+      "name": "download_file",
+      "description": "Save one public file, a one-accession zip, or a generated PDF to the download folder."
+    },
+    {
+      "name": "download_bundle",
+      "description": "Zip & Download many public files across accessions into the download folder."
+    },
+    {
+      "name": "collect_related",
+      "description": "Search a term or document type, then group related filings by docket."
+    }
+  ],
+  "prompts": [
+    {
+      "name": "search_comments",
+      "description": "Search eLibrary for comments and protests about a topic",
+      "arguments": ["topic"],
+      "text": "Search the public FERC eLibrary for comments and protests about ${arguments.topic} in the last year. Summarize who filed and what they argued."
+    },
+    {
+      "name": "docket_sheet",
+      "description": "Pull a docket sheet and list related filings",
+      "arguments": ["docket"],
+      "text": "Pull the public FERC eLibrary docket sheet for ${arguments.docket} and list the related filings in chronological order, with accession numbers."
+    },
+    {
+      "name": "download_accession",
+      "description": "Download the public files for an accession number",
+      "arguments": ["accession"],
+      "text": "Download the public files for FERC eLibrary accession ${arguments.accession} to my download folder. Tell me the saved path."
+    }
+  ],
+  "keywords": [
+    "ferc",
+    "elibrary",
+    "energy",
+    "regulatory",
+    "docket",
+    "filings"
+  ],
+  "license": "MIT",
+  "privacy_policies": [
+    "https://www.ferc.gov/privacy"
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "python": ">=3.12"
+    }
+  },
+  "user_config": {
+    "download_dir": {
+      "type": "directory",
+      "title": "Download folder",
+      "description": "Where public FERC filings are saved on this computer. The folder is created automatically if it does not exist.",
+      "required": false,
+      "default": "${HOME}/Downloads/ferc-elibrary"
+    }
+  }
+}
