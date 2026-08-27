@@ -136,9 +136,13 @@ async def test_get_filing_not_found(httpx_mock: HTTPXMock, client):
             "success": True,
             "errorMessage": None,
         },
+        is_reusable=True,
     )
-    with pytest.raises(FilingNotFoundError):
+    with pytest.raises(FilingNotFoundError, match="not in public eLibrary search"):
         await client.get_filing("20201119-9999")
+    bodies = [json.loads(req.content) for req in httpx_mock.get_requests()]
+    assert bodies[0]["availability"] == ["P"]
+    assert bodies[1]["availability"] == []
 
 
 async def test_get_docket_sheet(httpx_mock: HTTPXMock, client):
@@ -625,6 +629,47 @@ async def test_download_bundle_skips_restricted_accession(
     assert result.skipped is True
     assert result.skipped_accessions == ["20201119-5202"]
     assert not any("DownloadP8File" in str(r.url) for r in httpx_mock.get_requests())
+
+
+async def test_get_filing_retries_without_public_filter(
+    httpx_mock: HTTPXMock, client
+):
+    """Privileged filings are omitted from public search, not nonexistent."""
+    httpx_mock.add_response(url=SEARCH_URL, json=EMPTY_SEARCH)
+    httpx_mock.add_response(
+        url=SEARCH_URL, json=search_with_dockets(["CP21-470"], avail="N")
+    )
+    filing = await client.get_filing("20201119-5202")
+    assert filing.availability == "Privileged"
+    bodies = [json.loads(req.content) for req in httpx_mock.get_requests()]
+    assert bodies[0]["availability"] == ["P"]
+    assert bodies[1]["availability"] == []
+
+
+async def test_download_bundle_skips_accession_absent_from_public_search(
+    httpx_mock: HTTPXMock, client
+):
+    """A privileged miss must not abort the rest of the bundle with 'not found'."""
+    import io
+    import zipfile
+
+    packed = io.BytesIO()
+    with zipfile.ZipFile(packed, "w") as zf:
+        zf.writestr("20201119-5202_App.PDF", b"%PDF-1")
+    httpx_mock.add_response(url=SEARCH_URL, json=SAMPLE_SEARCH)
+    httpx_mock.add_response(url=SEARCH_URL, json=EMPTY_SEARCH, is_reusable=True)
+    httpx_mock.add_response(
+        url=DOWNLOAD_URL,
+        content=packed.getvalue(),
+        headers={"content-disposition": "attachment; filename=bundle.zip"},
+    )
+    result = await client.download_bundle(
+        accession_numbers=["20201119-5202", "20201119-9999"]
+    )
+    assert result.skipped is False
+    assert result.skipped_accessions == ["20201119-9999"]
+    assert Path(result.path).exists()
+    assert result.file_count == 1
 
 
 async def test_collect_related_download_uses_bundle(httpx_mock: HTTPXMock, client):

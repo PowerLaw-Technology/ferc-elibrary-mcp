@@ -15,7 +15,7 @@ from tests.fixtures import (
     search_with_dockets,
     search_with_files,
 )
-from tests.test_client import DOCKET_URL, SEARCH_URL
+from tests.test_client import DOCKET_URL, DOWNLOAD_URL, SEARCH_URL
 
 
 @pytest.fixture
@@ -217,6 +217,30 @@ async def test_download_file_tool_rejects_privileged(httpx_mock: HTTPXMock, elib
     async with Client(mcp) as session:
         with pytest.raises(ToolError, match="Privileged"):
             await session.call_tool("download_file", {"accession_number": "20201119-5202"})
+
+
+async def test_download_bundle_tool_skips_missing_accession_instead_of_aborting(
+    httpx_mock: HTTPXMock, elibrary
+):
+    import io
+    import zipfile
+
+    packed = io.BytesIO()
+    with zipfile.ZipFile(packed, "w") as zf:
+        zf.writestr("20201119-5202_App.PDF", b"%PDF-1")
+    httpx_mock.add_response(url=SEARCH_URL, json=SAMPLE_SEARCH)
+    httpx_mock.add_response(url=SEARCH_URL, json=EMPTY_SEARCH, is_reusable=True)
+    httpx_mock.add_response(url=DOWNLOAD_URL, content=packed.getvalue())
+    async with Client(mcp) as session:
+        result = await session.call_tool(
+            "download_bundle",
+            {
+                "accession_numbers": ["20201119-5202", "20201119-9999"],
+            },
+        )
+    assert result.data["skipped_accessions"] == ["20201119-9999"]
+    assert result.data["skipped"] is False
+    assert result.data["path"]
 
 
 async def test_collect_related_tool_caps(httpx_mock: HTTPXMock, elibrary):

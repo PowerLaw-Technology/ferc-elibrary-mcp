@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 BASE_URL = "https://elibrary.ferc.gov/eLibrarywebapi/api/"
@@ -18,9 +19,47 @@ RETRY_STATUS_CODES = frozenset({500, 502, 503, 504, 520, 521, 522, 524})
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 1.0
 
-DEFAULT_DOWNLOAD_DIR = Path(
-    os.environ.get("FERC_DOWNLOAD_DIR", str(Path.home() / "Downloads" / "ferc-elibrary"))
-)
+# Claude Desktop's MCPB host has been observed passing user_config defaults
+# through as literals (`${HOME}/Downloads/ferc-elibrary`) instead of expanding
+# them. Resolve placeholders here so files never land under the extension dir.
+_DOWNLOAD_DIR_PLACEHOLDERS = {
+    "HOME": lambda: str(Path.home()),
+    "USERPROFILE": lambda: str(Path.home()),
+    "DESKTOP": lambda: str(Path.home() / "Desktop"),
+    "DOCUMENTS": lambda: str(Path.home() / "Documents"),
+    "DOWNLOADS": lambda: str(Path.home() / "Downloads"),
+}
+_PLACEHOLDER_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def resolve_download_dir(raw: str | None = None) -> Path:
+    """Return an absolute download directory, expanding MCPB/shell placeholders.
+
+    Unset or blank ``FERC_DOWNLOAD_DIR`` uses ``~/Downloads/ferc-elibrary``.
+    """
+    if raw is None:
+        raw = os.environ.get("FERC_DOWNLOAD_DIR", "")
+    value = (raw or "").strip()
+    if not value:
+        return Path.home() / "Downloads" / "ferc-elibrary"
+
+    def _subst(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name in {"pathSeparator", "/"}:
+            return os.sep
+        factory = _DOWNLOAD_DIR_PLACEHOLDERS.get(name.upper())
+        return factory() if factory else match.group(0)
+
+    expanded = _PLACEHOLDER_RE.sub(_subst, value)
+    expanded = os.path.expandvars(expanded)
+    expanded = os.path.expanduser(expanded)
+    path = Path(expanded)
+    if not path.is_absolute():
+        path = Path.home() / path
+    return path
+
+
+DEFAULT_DOWNLOAD_DIR = Path.home() / "Downloads" / "ferc-elibrary"
 
 DEFAULT_SEARCH_LIMIT = 25
 MAX_SEARCH_LIMIT = 100
