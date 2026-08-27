@@ -1,22 +1,63 @@
 # FERC eLibrary MCP
 
-A [Model Context Protocol](https://modelcontextprotocol.io/) server that lets Claude Desktop search the public [FERC eLibrary](https://elibrary.ferc.gov/eLibrary/search), inspect docket sheets, and download public filings.
+A [Model Context Protocol](https://modelcontextprotocol.io/) server and async Python library for searching the public [FERC eLibrary](https://elibrary.ferc.gov/eLibrary/search), inspecting docket sheets, and downloading public filings. Works with any MCP client (Claude Desktop, Cursor, Claude Code, and others).
 
-FERC does not publish an official eLibrary developer API. This server talks to the same JSON backend the public website uses (`https://elibrary.ferc.gov/eLibrarywebapi/api/`). That interface is undocumented and can change.
+## Disclaimer
+
+FERC does not publish an official eLibrary developer API. This project talks to the same undocumented JSON backend the public website uses (`https://elibrary.ferc.gov/eLibrarywebapi/api/`). That interface can change without notice.
+
+- Public documents only — no FERC login, CEII, privileged, or protected content
+- Be polite about rate limits; the client spaces requests by default
+- Use this for research against publicly available filings, not as a substitute for official access procedures
 
 ## Requirements
 
 - Python 3.12+
-- [uv](https://docs.astral.sh/uv/)
-- [Claude Desktop](https://claude.ai/download)
+- [uv](https://docs.astral.sh/uv/) (for install and MCP launch)
 
 ## Install
 
+### End users (MCP clients)
+
+No clone required. Clients launch the server with `uvx` from git (see [MCP client configuration](#mcp-client-configuration)). Replace `OWNER` with the GitHub owner once the repo is published:
+
 ```bash
-git clone <this-repo>
+uvx --from git+https://github.com/OWNER/ferc-elibrary-mcp ferc-elibrary-mcp
+```
+
+### Contributors
+
+```bash
+git clone https://github.com/OWNER/ferc-elibrary-mcp
 cd ferc-elibrary-mcp
 uv sync
 ```
+
+## Library usage
+
+`ELibraryClient` is an async context manager. Use it from your own code without starting the MCP server:
+
+```python
+import asyncio
+from ferc_elibrary_mcp import ELibraryClient
+
+
+async def main() -> None:
+    async with ELibraryClient() as client:
+        raw, summaries, dates = await client.search(
+            query="shared facilities agreement",
+            match="phrase",
+        )
+        print(raw.total_hits, dates.source, len(summaries))
+        if summaries:
+            filing = await client.get_filing(summaries[0].accession_number)
+            print(filing.description, filing.url)
+
+
+asyncio.run(main())
+```
+
+Downloads go under `FERC_DOWNLOAD_DIR` (default `~/Downloads/ferc-elibrary`). Optional: set `FERC_RATE_LIMIT_SECONDS` (default `0.5`).
 
 ## Tools
 
@@ -88,28 +129,28 @@ Use `search_in="description"` when a phrase search still returns too much noise;
 
 eLibrary labels every download `application/octet-stream`, so the real type is inferred from magic bytes and the file extension. Results also report `expected_size` from FERC's metadata next to the bytes actually written, plus `size_matches_metadata` and `is_bundle`, so receiving a bundle when you asked for one file is visible rather than silent.
 
-## Test with MCP Inspector
+## MCP client configuration
 
-From the project directory:
+Replace `OWNER` with the GitHub owner of this repository. All snippets use portable `uvx` from git — no absolute machine paths.
 
-```bash
-npx @modelcontextprotocol/inspector uv run ferc-elibrary-mcp
-```
+Downloads default to `~/Downloads/ferc-elibrary` if `FERC_DOWNLOAD_DIR` is unset. Set `FERC_MCP_IDLE_TIMEOUT_SECONDS` to reap abandoned stdio instances (see [Orphaned server processes](#orphaned-server-processes)); omit it or use `0` to never self-terminate (the default).
 
-Call `search_filings` with `docket` `P-15056-000` and a `start_date` / `end_date` around `2020-11-19` to confirm a known public hit.
+### Claude Desktop
 
-## Claude Desktop
-
-Add the server to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or the equivalent Claude Desktop config on your OS:
 
 ```json
 {
   "mcpServers": {
     "ferc-elibrary": {
-      "command": "/Users/zoschin/Projects/ferc-elibrary-mcp/.venv/bin/ferc-elibrary-mcp",
-      "args": [],
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/OWNER/ferc-elibrary-mcp",
+        "ferc-elibrary-mcp"
+      ],
       "env": {
-        "FERC_DOWNLOAD_DIR": "/Users/zoschin/Downloads/ferc-elibrary",
+        "FERC_DOWNLOAD_DIR": "/Users/YOU/Downloads/ferc-elibrary",
         "FERC_MCP_IDLE_TIMEOUT_SECONDS": "14400"
       }
     }
@@ -117,11 +158,62 @@ Add the server to `~/Library/Application Support/Claude/claude_desktop_config.js
 }
 ```
 
-Use the absolute path to the venv entry point rather than `uv`. Claude Desktop is a GUI app and does not inherit your shell `PATH`, so a bare `uv` resolves only if it happens to sit in a system directory; on a Homebrew install it does not.
+Use an absolute path for `FERC_DOWNLOAD_DIR` (expand `~` yourself). Claude Desktop is a GUI app and may not expand `~` or inherit your shell `PATH`; ensure `uvx` is on a PATH the app can see (for example by installing uv system-wide or wrapping with the full path to `uvx`).
 
 Fully quit and reopen Claude Desktop. Confirm the server under **Settings → Developer**.
 
-Downloads default to `~/Downloads/ferc-elibrary` if `FERC_DOWNLOAD_DIR` is unset. See [Orphaned server processes](#orphaned-server-processes) for `FERC_MCP_IDLE_TIMEOUT_SECONDS`; remove it to restore the default of never self-terminating.
+### Cursor
+
+Add to `.cursor/mcp.json` in a project, or your user MCP config:
+
+```json
+{
+  "mcpServers": {
+    "ferc-elibrary": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/OWNER/ferc-elibrary-mcp",
+        "ferc-elibrary-mcp"
+      ],
+      "env": {
+        "FERC_DOWNLOAD_DIR": "/Users/YOU/Downloads/ferc-elibrary",
+        "FERC_MCP_IDLE_TIMEOUT_SECONDS": "14400"
+      }
+    }
+  }
+}
+```
+
+### Claude Code
+
+Project scope (`.mcp.json` at the project root) or user scope (`claude mcp add` / `~/.claude.json`):
+
+```json
+{
+  "mcpServers": {
+    "ferc-elibrary": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/OWNER/ferc-elibrary-mcp",
+        "ferc-elibrary-mcp"
+      ],
+      "env": {
+        "FERC_DOWNLOAD_DIR": "${HOME}/Downloads/ferc-elibrary",
+        "FERC_MCP_IDLE_TIMEOUT_SECONDS": "14400"
+      }
+    }
+  }
+}
+```
+
+Or via CLI:
+
+```bash
+claude mcp add --scope user ferc-elibrary -- \
+  uvx --from git+https://github.com/OWNER/ferc-elibrary-mcp ferc-elibrary-mcp
+```
 
 ## Example prompts
 
@@ -129,6 +221,16 @@ Downloads default to `~/Downloads/ferc-elibrary` if `FERC_DOWNLOAD_DIR` is unset
 - Pull the docket sheet for CP21-470 and list related filings.
 - Find Order/Opinion issuances in the electric industry from January 2024 and collect related docket filings.
 - Download the public PDF for accession 20201119-5202.
+
+## Test with MCP Inspector
+
+From a clone of the project:
+
+```bash
+npx @modelcontextprotocol/inspector uv run ferc-elibrary-mcp
+```
+
+Call `search_filings` with `docket` `P-15056-000` and a `start_date` / `end_date` around `2020-11-19` to confirm a known public hit.
 
 ## Tests
 
@@ -139,13 +241,19 @@ uv run pytest -m live   # optional smoke test against the live public API
 
 ## Limits
 
-## Orphaned server processes
+- Public documents only. No FERC login, CEII, privileged, or protected files.
+- File bytes are written to disk, not returned through the MCP tool response.
+- `collect_related` caps how many dockets and files it will pull so a broad query cannot dump thousands of filings into context.
+- The backend is undocumented and sits behind a proxy that intermittently returns 502/503/520. Transient 5xx responses are retried up to three times with backoff.
+- FERC returns HTTP 200 with `success: false` and a .NET exception string for some malformed payloads. Those are raised as errors rather than silently returning zero hits.
 
-Claude Desktop occasionally spawns two stdio servers within a second of each other and talks to only one. It does not close stdin on the abandoned instance, so that process never sees EOF and idles forever — one leaked pair per day in practice, and tool calls that get routed to a stale instance hang until the client's own timeout rather than failing.
+### Orphaned server processes
+
+Some MCP clients (notably Claude Desktop) occasionally spawn two stdio servers within a second of each other and talk to only one. They may not close stdin on the abandoned instance, so that process never sees EOF and idles forever — one leaked pair per day in practice, and tool calls that get routed to a stale instance hang until the client's own timeout rather than failing.
 
 The server itself is not at fault: it exits cleanly on stdin EOF (exit code 0) and on `SIGTERM`. An abandoned instance simply has no way to notice nobody is listening.
 
-Set `FERC_MCP_IDLE_TIMEOUT_SECONDS` to have an instance that has received no messages for that long shut itself down via `SIGTERM`. Any request resets the timer, so an in-use server is unaffected; only a fully abandoned one is reaped. It is **disabled by default** (`0`), because a healthy-but-unused server would also exit and recovery then depends on the client respawning it. The Claude Desktop config below sets 4 hours, comfortably longer than any gap in an active session.
+Set `FERC_MCP_IDLE_TIMEOUT_SECONDS` to have an instance that has received no messages for that long shut itself down via `SIGTERM`. Any request resets the timer, so an in-use server is unaffected; only a fully abandoned one is reaped. It is **disabled by default** (`0`), because a healthy-but-unused server would also exit and recovery then depends on the client respawning it. The sample configs above set 4 hours, comfortably longer than any gap in an active session.
 
 To check for and clear strays by hand:
 
@@ -154,8 +262,6 @@ ps -eo pid,etime,command | grep '[f]erc-elibrary-mcp'
 kill -TERM <pid>   # they are idle, not wedged; no -9 needed
 ```
 
-- Public documents only. No FERC login, CEII, privileged, or protected files.
-- File bytes are written to disk, not sent back to Claude.
-- `collect_related` caps how many dockets and files it will pull so a broad query cannot dump thousands of filings into context.
-- The backend is undocumented and sits behind a proxy that intermittently returns 502/503/520. Transient 5xx responses are retried up to three times with backoff.
-- FERC returns HTTP 200 with `success: false` and a .NET exception string for some malformed payloads. Those are raised as errors rather than silently returning zero hits.
+## License
+
+MIT — see [LICENSE](LICENSE).
