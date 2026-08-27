@@ -56,7 +56,11 @@ class ELibraryClient:
     ) -> None:
         self._http = http
         self._owns_http = http is None
-        self._download_dir = Path(download_dir or config.DEFAULT_DOWNLOAD_DIR)
+        self._download_dir = (
+            Path(download_dir)
+            if download_dir is not None
+            else config.resolve_download_dir()
+        )
         self._rate_limit = (
             config.RATE_LIMIT_SECONDS if rate_limit_seconds is None else rate_limit_seconds
         )
@@ -260,12 +264,27 @@ class ELibraryClient:
             start_date=None,
             end_date=None,
         )
-        for hit in parsed.search_hits:
-            if hit.accession_number == accession_number:
-                return hit_to_detail(hit)
-        if parsed.search_hits:
-            return hit_to_detail(parsed.search_hits[0])
-        raise FilingNotFoundError(f"No filing found for accession {accession_number}")
+        hit = _hit_for_accession(parsed, accession_number)
+        if hit is None:
+            # Public search omits privileged/CEII/protected filings, so a miss
+            # is not "the accession does not exist." Retry without the public
+            # filter so callers can distinguish restricted from absent.
+            parsed, _, _dates = await self.search(
+                accession_number=accession_number,
+                page=1,
+                limit=10,
+                start_date=None,
+                end_date=None,
+                public_only=False,
+            )
+            hit = _hit_for_accession(parsed, accession_number)
+        if hit is None:
+            raise FilingNotFoundError(
+                f"Accession {accession_number} is not in public eLibrary search. "
+                "If it exists it is likely privileged, protected, or CEII and "
+                "cannot be downloaded."
+            )
+        return hit_to_detail(hit)
 
     async def list_files(self, accession_number: str) -> FilingDetail:
         return await self.get_filing(accession_number)
@@ -486,6 +505,10 @@ class ELibraryClient:
         download + rate-limit gap each). FERC names members
         ``{accession}_{filename}``; when organize_by_accession is true we
         rewrite them to ``{accession}/{filename}`` folders.
+
+        Privileged, protected, and CEII accessions — including those omitted
+        from public search — are listed in ``skipped_accessions`` and do not
+        abort the rest of the bundle.
         """
         accessions = [a.strip() for a in (accession_numbers or []) if a and a.strip()]
         ids = [i.strip() for i in (file_ids or []) if i and i.strip()]
@@ -523,7 +546,14 @@ class ELibraryClient:
         for accession in accessions:
             if files_capped:
                 break
-            filing = await self.get_filing(accession)
+            try:
+                filing = await self.get_filing(accession)
+            except FilingNotFoundError:
+                # Public search (and often unrestricted search) omit privileged
+                # / CEII / protected filings. Skip them rather than aborting
+                # the rest of the bundle.
+                skipped_accessions.append(accession)
+                continue
             if filing.availability.lower() != "public":
                 skipped_accessions.append(accession)
                 continue
@@ -1103,6 +1133,18 @@ def _unique_dockets(hits: list[SearchHit]) -> list[str]:
             if number and number not in seen:
                 seen.append(number)
     return seen
+
+
+def _hit_for_accession(
+    parsed: SearchResponse, accession_number: str
+) -> SearchHit | None:
+    """Return the hit for this accession, or the first hit, or None."""
+    for hit in parsed.search_hits:
+        if hit.accession_number == accession_number:
+            return hit
+    if parsed.search_hits:
+        return parsed.search_hits[0]
+    return None
 
 
 def _select_transmittal(filing: FilingDetail, file_id: str | None) -> Transmittal:

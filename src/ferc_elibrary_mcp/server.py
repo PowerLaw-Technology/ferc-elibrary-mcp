@@ -284,8 +284,9 @@ async def download_bundle(
     ``accession_filename`` members into ``accession/filename`` folders.
 
     Caps: 100 files and 500 MB by default (FERC_MAX_BUNDLE_FILES /
-    FERC_MAX_BUNDLE_BYTES). Privileged/CEII accessions are skipped and listed
-    in skipped_accessions. Does not return file bytes.
+    FERC_MAX_BUNDLE_BYTES). Privileged, protected, and CEII accessions — and
+    accessions absent from public search — are skipped and listed in
+    skipped_accessions. Does not return file bytes.
     """
     try:
         result = await get_client().download_bundle(
