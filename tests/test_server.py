@@ -238,7 +238,17 @@ async def test_download_bundle_tool_skips_missing_accession_instead_of_aborting(
                 "accession_numbers": ["20201119-5202", "20201119-9999"],
             },
         )
-    assert result.data["skipped_accessions"] == ["20201119-9999"]
+    assert result.data["skipped_accessions"] == [
+        {
+            "accession_number": "20201119-9999",
+            "reason": (
+                "Not found in eLibrary. Check for a typo; if the "
+                "accession exists it may be privileged, protected, "
+                "or CEII and cannot be downloaded."
+            ),
+            "category": "not_found",
+        }
+    ]
     assert result.data["skipped"] is False
     assert result.data["path"]
 

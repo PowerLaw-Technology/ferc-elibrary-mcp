@@ -16,6 +16,7 @@ from ferc_elibrary_mcp.client import (
     guess_content_type,
     resolve_date_range,
     split_docket_number,
+    unwrap_single_member_zip,
 )
 from ferc_elibrary_mcp import config
 from ferc_elibrary_mcp.config import BASE_URL
@@ -498,6 +499,16 @@ def test_guess_content_type_ignores_octet_stream():
     assert guess_content_type(b"\x00\x01", "mystery.bin") == "application/octet-stream"
 
 
+def test_guess_content_type_docx_beats_zip_magic():
+    """A .docx is a ZIP; PK magic must not label it application/zip."""
+    assert guess_content_type(
+        b"PK\x03\x04" + b"ooxml", "Order.docx"
+    ).endswith("wordprocessingml.document")
+    assert guess_content_type(
+        b"PK\x03\x04" + b"ooxml", "rates.xlsx"
+    ).endswith("spreadsheetml.sheet")
+
+
 async def test_search_phrase_mode_quotes_multiword(httpx_mock: HTTPXMock, client):
     httpx_mock.add_response(url=SEARCH_URL, json=SAMPLE_SEARCH)
     await client.search(query="shared facilities agreement")
@@ -558,12 +569,103 @@ async def test_download_flags_size_mismatch_and_bundle(httpx_mock: HTTPXMock, cl
 
 
 async def test_zip_format_requests_all_files(httpx_mock: HTTPXMock, client):
+    import io
+    import zipfile
+
+    packed = io.BytesIO()
+    with zipfile.ZipFile(packed, "w") as zf:
+        zf.writestr("20201119-5202_App.PDF", b"%PDF-1")
+        zf.writestr("20201119-5202_ExA.pdf", b"%PDF-2")
     httpx_mock.add_response(url=SEARCH_URL, json=SAMPLE_SEARCH)
-    httpx_mock.add_response(url=DOWNLOAD_URL, content=b"PK\x03\x04zip")
+    httpx_mock.add_response(url=DOWNLOAD_URL, content=packed.getvalue())
     result = await client.download_file("20201119-5202", format="zip")
     body = json.loads(httpx_mock.get_requests()[-1].content)
     assert body["accession"] == "20201119-5202"
     assert result.is_bundle is True
+    assert result.content_type == "application/zip"
+    assert Path(result.path).read_bytes()[:2] == b"PK"
+
+
+async def test_zip_format_unwraps_single_member_and_refreshes_metadata(
+    httpx_mock: HTTPXMock, client
+):
+    """One-file accession zip must save the document, not a mislabeled archive."""
+    import io
+    import zipfile
+
+    packed = io.BytesIO()
+    with zipfile.ZipFile(packed, "w") as zf:
+        zf.writestr("20201119-5202_App.PDF", b"%PDF-1.4 unwrapped")
+    httpx_mock.add_response(url=SEARCH_URL, json=SAMPLE_SEARCH)
+    httpx_mock.add_response(
+        url=DOWNLOAD_URL,
+        content=packed.getvalue(),
+        headers={"content-disposition": "attachment; filename=20201119-5202.zip"},
+    )
+    result = await client.download_file("20201119-5202", format="zip")
+    assert result.is_bundle is False
+    assert result.content_type == "application/pdf"
+    assert result.file_name == "App.PDF"
+    assert result.expected_size == 472488
+    assert result.size_matches_metadata is False  # tiny fixture payload
+    assert Path(result.path).read_bytes().startswith(b"%PDF")
+    assert not result.path.endswith(".zip")
+
+
+async def test_zip_format_bare_docx_reports_office_type_not_zip(
+    httpx_mock: HTTPXMock, client
+):
+    """eLibrary may return a bare OOXML file for a one-file zip request."""
+    import io
+    import zipfile
+
+    docx = io.BytesIO()
+    with zipfile.ZipFile(docx, "w") as zf:
+        zf.writestr("[Content_Types].xml", b"<Types/>")
+        zf.writestr("word/document.xml", b"<w:document/>")
+    payload = search_with_files(
+        [
+            {
+                "fileId": "DOCX-1",
+                "fileName": "Order.docx",
+                "fileType": "DOCX",
+                "fileFormat": "DOCX",
+                "fileSize": len(docx.getvalue()),
+                "fileDesc": "Order",
+            }
+        ]
+    )
+    httpx_mock.add_response(url=SEARCH_URL, json=payload)
+    httpx_mock.add_response(
+        url=DOWNLOAD_URL,
+        content=docx.getvalue(),
+        headers={"content-disposition": 'attachment; filename="Order.docx"'},
+    )
+    result = await client.download_file("20201119-5202", format="zip")
+    assert result.is_bundle is False
+    assert result.content_type.endswith("wordprocessingml.document")
+    assert result.file_name == "Order.docx"
+    assert result.expected_size == len(docx.getvalue())
+    assert result.size_matches_metadata is True
+
+
+def test_unwrap_single_member_zip_leaves_ooxml_alone():
+    import io
+    import zipfile
+
+    docx = io.BytesIO()
+    with zipfile.ZipFile(docx, "w") as zf:
+        zf.writestr("[Content_Types].xml", b"<Types/>")
+        zf.writestr("word/document.xml", b"<w:document/>")
+    assert unwrap_single_member_zip(docx.getvalue()) is None
+
+    packed = io.BytesIO()
+    with zipfile.ZipFile(packed, "w") as zf:
+        zf.writestr("20201119-5202_App.PDF", b"%PDF")
+    out = unwrap_single_member_zip(packed.getvalue())
+    assert out is not None
+    assert out[0] == b"%PDF"
+    assert out[1] == "App.PDF"
 
 
 def test_folderize_zip_builds_accession_folders():
@@ -627,7 +729,9 @@ async def test_download_bundle_skips_restricted_accession(
     )
     result = await client.download_bundle(accession_numbers=["20201119-5202"])
     assert result.skipped is True
-    assert result.skipped_accessions == ["20201119-5202"]
+    assert [s.accession_number for s in result.skipped_accessions] == ["20201119-5202"]
+    assert result.skipped_accessions[0].category == "restricted"
+    assert "CEII" in result.skipped_accessions[0].reason
     assert not any("DownloadP8File" in str(r.url) for r in httpx_mock.get_requests())
 
 
@@ -667,7 +771,9 @@ async def test_download_bundle_skips_accession_absent_from_public_search(
         accession_numbers=["20201119-5202", "20201119-9999"]
     )
     assert result.skipped is False
-    assert result.skipped_accessions == ["20201119-9999"]
+    assert [s.accession_number for s in result.skipped_accessions] == ["20201119-9999"]
+    assert result.skipped_accessions[0].category == "not_found"
+    assert "typo" in result.skipped_accessions[0].reason.lower()
     assert Path(result.path).exists()
     assert result.file_count == 1
 

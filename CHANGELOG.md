@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `download_file(format=zip)` unwraps single-member archives and refreshes `content_type` / `is_bundle` / `expected_size` for the saved file (including bare `.docx` OOXML)
+- Prefer OOXML extensions over ZIP magic when sniffing content types
+- `download_bundle.skipped_accessions` now includes `reason` and `category` (`restricted` vs `not_found`)
+
 ## 0.1.1 — 2026-08-27
 
 - Expand unexpanded MCPB placeholders (`${HOME}`, `~`, `${DOWNLOADS}`) in `FERC_DOWNLOAD_DIR` so Claude Desktop downloads land in the real Downloads folder

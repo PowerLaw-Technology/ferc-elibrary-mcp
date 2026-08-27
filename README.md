@@ -155,7 +155,7 @@ For **many files or many accessions**, use `download_bundle` instead. It calls t
 
 `collect_related(..., download=True)` uses that bulk path and returns a `bundle` field pointing at the archive.
 
-eLibrary labels every download `application/octet-stream`, so the real type is inferred from magic bytes and the file extension. Single-file results also report `expected_size` from FERC's metadata next to the bytes actually written, plus `size_matches_metadata` and `is_bundle`, so receiving a bundle when you asked for one file is visible rather than silent.
+eLibrary labels every download `application/octet-stream`, so the real type is inferred from magic bytes and the file extension (OOXML extensions win over ZIP magic, since `.docx` is itself a ZIP). Single-file results also report `expected_size` from FERC's metadata next to the bytes actually written, plus `size_matches_metadata` and `is_bundle`, so receiving a bundle when you asked for one file is visible rather than silent. `format=zip` on a one-file accession unwraps to that file and updates those fields to match what was saved.
 
 ## Build the Claude Desktop bundle
 

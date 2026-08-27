@@ -205,6 +205,16 @@ class DownloadResult(BaseModel):
     skip_reason: str | None = None
 
 
+class SkippedAccession(BaseModel):
+    """Why one accession was left out of a download_bundle."""
+
+    accession_number: str
+    reason: str
+    # "restricted" = privileged/CEII/protected; "not_found" = absent from eLibrary
+    # (typo candidate). Agents should retry typos and give up on restricted.
+    category: str = "not_found"
+
+
 class BundleDownloadResult(BaseModel):
     """One Zip & Download archive spanning one or many accessions."""
 
@@ -218,7 +228,7 @@ class BundleDownloadResult(BaseModel):
     organized_by_accession: bool = True
     expected_size: int | None = None
     files_capped: bool = False
-    skipped_accessions: list[str] = Field(default_factory=list)
+    skipped_accessions: list[SkippedAccession] = Field(default_factory=list)
     skipped: bool = False
     skip_reason: str | None = None
 

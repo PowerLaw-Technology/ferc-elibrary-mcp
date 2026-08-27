@@ -19,6 +19,7 @@ from ferc_elibrary_mcp.models import (
     RelatedCollection,
     SearchHit,
     SearchResponse,
+    SkippedAccession,
     Transmittal,
 )
 from ferc_elibrary_mcp.server import main, mcp
@@ -40,6 +41,7 @@ __all__ = [
     "RestrictedDocumentError",
     "SearchHit",
     "SearchResponse",
+    "SkippedAccession",
     "Transmittal",
     "main",
     "mcp",
