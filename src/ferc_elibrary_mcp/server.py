@@ -248,8 +248,10 @@ async def download_file(
     refused. Call list_files first to pick a file_id.
 
     format=native saves that one original file and is the default. format=zip
-    bundles every file on the accession into one archive. format=pdf asks
-    eLibrary to generate a combined PDF of the whole accession.
+    asks eLibrary for every file on the accession as one archive; if the
+    accession has a single attachment, the archive is unwrapped to that file
+    and content_type / is_bundle / expected_size describe the saved document.
+    format=pdf asks eLibrary to generate a combined PDF of the whole accession.
 
     The result reports expected_size from FERC's metadata alongside the byte
     count actually written, plus size_matches_metadata and is_bundle, so a
@@ -286,7 +288,8 @@ async def download_bundle(
     Caps: 100 files and 500 MB by default (FERC_MAX_BUNDLE_FILES /
     FERC_MAX_BUNDLE_BYTES). Privileged, protected, and CEII accessions — and
     accessions absent from public search — are skipped and listed in
-    skipped_accessions. Does not return file bytes.
+    skipped_accessions with a reason and category (restricted vs not_found).
+    Does not return file bytes.
     """
     try:
         result = await get_client().download_bundle(

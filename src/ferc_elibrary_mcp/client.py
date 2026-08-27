@@ -34,6 +34,7 @@ from ferc_elibrary_mcp.models import (
     SearchHit,
     SearchResponse,
     SearchScope,
+    SkippedAccession,
     SortOrder,
     Transmittal,
     file_list_url,
@@ -436,13 +437,19 @@ class ELibraryClient:
                 },
             )
             filename = _safe_name(suggested or "") or f"{accession_number}.zip"
+            body, filename, is_bundle, expected_size = _normalize_zip_download(
+                body,
+                filename,
+                filing=filing,
+            )
             return self._write_download(
                 dest_dir / filename,
                 body,
                 accession_number,
                 filename,
                 max_bytes=max_bytes,
-                is_bundle=True,
+                is_bundle=is_bundle,
+                expected_size=expected_size,
             )
 
         transmittal = _select_transmittal(filing, file_id)
@@ -521,7 +528,7 @@ class ELibraryClient:
         selected: list[str] = []
         seen: set[str] = set()
         accession_set: set[str] = set()
-        skipped_accessions: list[str] = []
+        skipped_accessions: list[SkippedAccession] = []
         expected_total = 0
         files_capped = False
 
@@ -552,10 +559,29 @@ class ELibraryClient:
                 # Public search (and often unrestricted search) omit privileged
                 # / CEII / protected filings. Skip them rather than aborting
                 # the rest of the bundle.
-                skipped_accessions.append(accession)
+                skipped_accessions.append(
+                    SkippedAccession(
+                        accession_number=accession,
+                        reason=(
+                            "Not found in eLibrary. Check for a typo; if the "
+                            "accession exists it may be privileged, protected, "
+                            "or CEII and cannot be downloaded."
+                        ),
+                        category="not_found",
+                    )
+                )
                 continue
             if filing.availability.lower() != "public":
-                skipped_accessions.append(accession)
+                skipped_accessions.append(
+                    SkippedAccession(
+                        accession_number=accession,
+                        reason=(
+                            f"{filing.availability}; only public documents can "
+                            "be downloaded."
+                        ),
+                        category="restricted",
+                    )
+                )
                 continue
             for item in filing.files:
                 if not _take(item.file_id, accession, item.file_size):
@@ -1009,15 +1035,106 @@ def build_search_text(query: str | None, match: MatchMode) -> str:
 
 
 def guess_content_type(body: bytes, file_name: str = "") -> str:
-    """eLibrary always claims octet-stream, so sniff the bytes, then the name."""
+    """eLibrary always claims octet-stream, so sniff the bytes, then the name.
+
+    OOXML files (.docx/.xlsx/.pptx) are ZIP containers, so the PK magic must
+    not win over a known office extension — otherwise a bare Word file is
+    reported as application/zip and is_bundle=true.
+    """
+    suffix = Path(file_name).suffix.lower()
+    if suffix in config.OOXML_EXTENSIONS:
+        return config.EXTENSION_CONTENT_TYPES.get(
+            suffix,
+            mimetypes.guess_type(file_name)[0] or "application/octet-stream",
+        )
     for magic, content_type in config.MAGIC_CONTENT_TYPES:
         if body.startswith(magic):
             return content_type
-    suffix = Path(file_name).suffix.lower()
     if suffix in config.EXTENSION_CONTENT_TYPES:
         return config.EXTENSION_CONTENT_TYPES[suffix]
     guessed, _ = mimetypes.guess_type(file_name or "file")
     return guessed or "application/octet-stream"
+
+
+def _zip_file_members(body: bytes) -> list[zipfile.ZipInfo] | None:
+    if body[:2] != b"PK":
+        return None
+    try:
+        with zipfile.ZipFile(io.BytesIO(body)) as zf:
+            return [info for info in zf.infolist() if not info.is_dir()]
+    except zipfile.BadZipFile:
+        return None
+
+
+def _is_ooxml_package(body: bytes) -> bool:
+    """True when body is an Office Open XML package, not an eLibrary zip."""
+    members = _zip_file_members(body)
+    if not members:
+        return False
+    return any(
+        Path(info.filename).name == "[Content_Types].xml" for info in members
+    )
+
+
+def unwrap_single_member_zip(body: bytes) -> tuple[bytes, str] | None:
+    """If body is an eLibrary zip with exactly one file, return that file.
+
+    OOXML packages are also zips; leave them alone so .docx stays intact.
+    """
+    if _is_ooxml_package(body):
+        return None
+    members = _zip_file_members(body)
+    if members is None or len(members) != 1:
+        return None
+    info = members[0]
+    try:
+        with zipfile.ZipFile(io.BytesIO(body)) as zf:
+            payload = zf.read(info)
+    except zipfile.BadZipFile:
+        return None
+    name = Path(info.filename).name
+    match = _ACCESSION_ZIP_PREFIX.match(name)
+    if match:
+        name = match.group(2)
+    return payload, name
+
+
+def _normalize_zip_download(
+    body: bytes,
+    filename: str,
+    *,
+    filing: FilingDetail,
+) -> tuple[bytes, str, bool, int | None]:
+    """Return (body, filename, is_bundle, expected_size) after single-file unwrap.
+
+    format=zip always *requests* a zip, but for a one-file accession eLibrary
+    may return a one-member archive (or a bare OOXML file). Save the real
+    document and refresh metadata so content_type / is_bundle / expected_size
+    describe what landed on disk.
+    """
+    single = filing.files[0] if len(filing.files) == 1 else None
+    single_size = single.file_size or None if single else None
+
+    unwrapped = unwrap_single_member_zip(body)
+    if unwrapped is not None:
+        payload, inner_name = unwrapped
+        name = _safe_name(inner_name) or (
+            _safe_name(single.file_name) if single and single.file_name else filename
+        )
+        return payload, name, False, single_size
+
+    if _is_ooxml_package(body):
+        name = filename
+        suffix = Path(name).suffix.lower()
+        if suffix not in config.OOXML_EXTENSIONS:
+            if single and single.file_name:
+                name = _safe_name(single.file_name) or name
+            elif not name.lower().endswith(".docx"):
+                name = f"{Path(name).stem}.docx"
+        return body, name, False, single_size
+
+    expected = sum((f.file_size or 0) for f in filing.files) or None
+    return body, filename, True, expected
 
 
 def _filename_from_disposition(disposition: str) -> str | None:

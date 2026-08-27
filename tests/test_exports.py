@@ -17,6 +17,7 @@ from ferc_elibrary_mcp import (
     RestrictedDocumentError,
     SearchHit,
     SearchResponse,
+    SkippedAccession,
     Transmittal,
     __all__,
     main,
@@ -42,6 +43,7 @@ def test_public_exports_include_client_and_models() -> None:
         "RestrictedDocumentError",
         "SearchHit",
         "SearchResponse",
+        "SkippedAccession",
         "Transmittal",
         "main",
         "mcp",
@@ -68,6 +70,7 @@ def test_public_exports_include_client_and_models() -> None:
             RestrictedDocumentError,
             SearchHit,
             SearchResponse,
+            SkippedAccession,
             Transmittal,
         )
     )
