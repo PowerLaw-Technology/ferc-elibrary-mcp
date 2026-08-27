@@ -67,8 +67,9 @@ Downloads go under `FERC_DOWNLOAD_DIR` (default `~/Downloads/ferc-elibrary`). Op
 | `get_docket` | Docket sheet: related filings, applicants, accession numbers. See [Docket sheets vs search](#docket-sheets-vs-search) for how it differs from `search_filings`. |
 | `get_filing` | Metadata for one accession (`YYYYMMDD-NNNN`). |
 | `list_files` | Files attached to an accession (call before downloading). |
-| `download_file` | Save a **public** single file, accession zip, or generated PDF under `FERC_DOWNLOAD_DIR`. Does not return bytes. |
-| `collect_related` | Search a term or document type, then group related filings by docket (capped at 10 dockets × 50 filings). Optional downloads: 10 public files, skip over 25 MB. |
+| `download_file` | Save a **public** single file, one-accession zip, or generated PDF under `FERC_DOWNLOAD_DIR`. Does not return bytes. |
+| `download_bundle` | **Preferred for bulk:** Zip & Download many public files across accessions in one request into `FERC_DOWNLOAD_DIR/bundles`, with per-accession folders. |
+| `collect_related` | Search a term or document type, then group related filings by docket (capped at 10 dockets × 50 filings). Optional `download` uses `download_bundle` (up to 10 files). |
 
 Privileged, protected, and CEII documents are refused.
 
@@ -121,13 +122,17 @@ Use `search_in="description"` when a phrase search still returns too much noise;
 
 ## Download formats
 
-`download_file` takes a `format`:
+`download_file` takes a `format` for a **single accession**:
 
 - `native` (default) saves the one file identified by `file_id`.
-- `zip` bundles every file on the accession.
+- `zip` bundles every file on that accession.
 - `pdf` asks eLibrary to generate a combined PDF of the accession.
 
-eLibrary labels every download `application/octet-stream`, so the real type is inferred from magic bytes and the file extension. Results also report `expected_size` from FERC's metadata next to the bytes actually written, plus `size_matches_metadata` and `is_bundle`, so receiving a bundle when you asked for one file is visible rather than silent.
+For **many files or many accessions**, use `download_bundle` instead. It calls the same Zip & Download endpoint the eLibrary UI uses when you fill the green zip folder — one HTTP request with a list of file IDs — rather than N× (`get_filing` + download + rate-limit wait). Pass any mix of `accession_numbers`, `file_ids`, and/or `docket`. By default the flat FERC names (`20260716-5098_Agreement.pdf`) are rewritten into folders (`20260716-5098/Agreement.pdf`). Caps default to 100 files / 500 MB (`FERC_MAX_BUNDLE_FILES`, `FERC_MAX_BUNDLE_BYTES`); raise `FERC_BUNDLE_TIMEOUT_SECONDS` (default 300) for very large archives.
+
+`collect_related(..., download=True)` uses that bulk path and returns a `bundle` field pointing at the archive.
+
+eLibrary labels every download `application/octet-stream`, so the real type is inferred from magic bytes and the file extension. Single-file results also report `expected_size` from FERC's metadata next to the bytes actually written, plus `size_matches_metadata` and `is_bundle`, so receiving a bundle when you asked for one file is visible rather than silent.
 
 ## MCP client configuration
 

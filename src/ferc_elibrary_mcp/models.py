@@ -205,6 +205,24 @@ class DownloadResult(BaseModel):
     skip_reason: str | None = None
 
 
+class BundleDownloadResult(BaseModel):
+    """One Zip & Download archive spanning one or many accessions."""
+
+    path: str
+    size: int
+    content_type: str = "application/zip"
+    file_name: str
+    file_count: int
+    accession_numbers: list[str] = Field(default_factory=list)
+    file_ids: list[str] = Field(default_factory=list)
+    organized_by_accession: bool = True
+    expected_size: int | None = None
+    files_capped: bool = False
+    skipped_accessions: list[str] = Field(default_factory=list)
+    skipped: bool = False
+    skip_reason: str | None = None
+
+
 class RelatedCollection(BaseModel):
     query: str | None = None
     document_type: str | None = None
@@ -218,6 +236,7 @@ class RelatedCollection(BaseModel):
     filings_capped_per_docket: int
     groups: list[DocketSheet]
     downloads: list[DownloadResult] = Field(default_factory=list)
+    bundle: BundleDownloadResult | None = None
 
 
 def file_list_url(accession_number: str) -> str:

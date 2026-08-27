@@ -1,6 +1,7 @@
 """Public package export surface."""
 
 from ferc_elibrary_mcp import (
+    BundleDownloadResult,
     DateRangeResolution,
     DocketFiling,
     DocketSheet,
@@ -25,6 +26,7 @@ from ferc_elibrary_mcp import (
 
 def test_public_exports_include_client_and_models() -> None:
     expected = {
+        "BundleDownloadResult",
         "DateRangeResolution",
         "DocketFiling",
         "DocketSheet",
@@ -48,10 +50,10 @@ def test_public_exports_include_client_and_models() -> None:
     assert ELibraryClient is not None
     assert callable(main)
     assert mcp is not None
-    # Touch imported symbols so unused-import checkers stay quiet.
     assert all(
         name is not None
         for name in (
+            BundleDownloadResult,
             DateRangeResolution,
             DocketFiling,
             DocketSheet,

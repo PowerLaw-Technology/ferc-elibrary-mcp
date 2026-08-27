@@ -10,7 +10,9 @@ from pytest_httpx import HTTPXMock
 
 from ferc_elibrary_mcp.client import (
     ELibraryClient,
+    accessions_in_zip,
     build_search_text,
+    folderize_zip,
     guess_content_type,
     resolve_date_range,
     split_docket_number,
@@ -558,6 +560,93 @@ async def test_zip_format_requests_all_files(httpx_mock: HTTPXMock, client):
     body = json.loads(httpx_mock.get_requests()[-1].content)
     assert body["accession"] == "20201119-5202"
     assert result.is_bundle is True
+
+
+def test_folderize_zip_builds_accession_folders():
+    import io
+    import zipfile
+
+    raw = io.BytesIO()
+    with zipfile.ZipFile(raw, "w") as zf:
+        zf.writestr("20260716-5098_Agreement.pdf", b"%PDF-a")
+        zf.writestr("20260817-5147_Answer.pdf", b"%PDF-b")
+        zf.writestr("readme.txt", b"hi")
+    out = folderize_zip(raw.getvalue())
+    with zipfile.ZipFile(io.BytesIO(out)) as zf:
+        names = set(zf.namelist())
+    assert names == {
+        "20260716-5098/Agreement.pdf",
+        "20260817-5147/Answer.pdf",
+        "readme.txt",
+    }
+    assert accessions_in_zip(out) == ["20260716-5098", "20260817-5147"]
+
+
+async def test_download_bundle_one_request_many_ids(httpx_mock: HTTPXMock, client):
+    import io
+    import zipfile
+
+    packed = io.BytesIO()
+    with zipfile.ZipFile(packed, "w") as zf:
+        zf.writestr("20201119-5202_App.PDF", b"%PDF-1")
+        zf.writestr("20260716-5098_SFA.pdf", b"%PDF-2")
+    httpx_mock.add_response(
+        url=DOWNLOAD_URL,
+        content=packed.getvalue(),
+        headers={"content-disposition": "attachment; filename=bundle.zip"},
+    )
+    result = await client.download_bundle(
+        file_ids=[
+            "020AAB97-66E2-5005-8110-C31FAFC91712",
+            "77602C02-8449-CD32-8585-9F6C2BE00000",
+        ]
+    )
+    assert result.skipped is False
+    assert result.file_count == 2
+    assert result.organized_by_accession is True
+    assert Path(result.path).exists()
+    body = json.loads(httpx_mock.get_requests()[-1].content)
+    assert body["accession"] == ""
+    assert len(body["fileidLst"]) == 2
+    with zipfile.ZipFile(result.path) as zf:
+        assert set(zf.namelist()) == {
+            "20201119-5202/App.PDF",
+            "20260716-5098/SFA.pdf",
+        }
+
+
+async def test_download_bundle_skips_restricted_accession(
+    httpx_mock: HTTPXMock, client
+):
+    httpx_mock.add_response(
+        url=SEARCH_URL, json=search_with_dockets(["CP21-470"], avail="C")
+    )
+    result = await client.download_bundle(accession_numbers=["20201119-5202"])
+    assert result.skipped is True
+    assert result.skipped_accessions == ["20201119-5202"]
+    assert not any("DownloadP8File" in str(r.url) for r in httpx_mock.get_requests())
+
+
+async def test_collect_related_download_uses_bundle(httpx_mock: HTTPXMock, client):
+    import io
+    import zipfile
+
+    packed = io.BytesIO()
+    with zipfile.ZipFile(packed, "w") as zf:
+        zf.writestr("20201119-5202_App.PDF", b"%PDF")
+    httpx_mock.add_response(url=SEARCH_URL, json=SAMPLE_SEARCH)
+    httpx_mock.add_response(url=DOCKET_URL, json=SAMPLE_DOCKET_SHEET, is_reusable=True)
+    httpx_mock.add_response(url=DOWNLOAD_URL, content=packed.getvalue())
+    collection = await client.collect_related(query="ashokan", download=True)
+    assert collection.bundle is not None
+    assert collection.bundle.file_count == 1
+    assert collection.bundle.path
+    assert len(collection.downloads) == 1
+    assert collection.downloads[0].is_bundle is True
+    download_calls = [
+        r for r in httpx_mock.get_requests() if "DownloadP8File" in str(r.url)
+    ]
+    assert len(download_calls) == 1
 
 
 async def test_download_rejects_ceii(httpx_mock: HTTPXMock, client):

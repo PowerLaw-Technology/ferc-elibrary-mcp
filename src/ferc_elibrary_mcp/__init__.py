@@ -8,6 +8,7 @@ from ferc_elibrary_mcp.exceptions import (
     RestrictedDocumentError,
 )
 from ferc_elibrary_mcp.models import (
+    BundleDownloadResult,
     DateRangeResolution,
     DocketFiling,
     DocketSheet,
@@ -23,6 +24,7 @@ from ferc_elibrary_mcp.models import (
 from ferc_elibrary_mcp.server import main, mcp
 
 __all__ = [
+    "BundleDownloadResult",
     "DateRangeResolution",
     "DocketFiling",
     "DocketSheet",

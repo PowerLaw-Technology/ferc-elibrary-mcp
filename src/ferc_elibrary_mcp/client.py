@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import mimetypes
 import re
 import time
+import zipfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,7 @@ from ferc_elibrary_mcp.exceptions import (
     RestrictedDocumentError,
 )
 from ferc_elibrary_mcp.models import (
+    BundleDownloadResult,
     DateField,
     DateRangeResolution,
     DocketFiling,
@@ -39,6 +42,7 @@ from ferc_elibrary_mcp.models import (
 )
 
 _UNSAFE_NAME = re.compile(r"[^\w.\- ]+", re.UNICODE)
+_ACCESSION_ZIP_PREFIX = re.compile(r"^(\d{8}-\d{4})_(.+)$")
 
 
 class ELibraryClient:
@@ -177,6 +181,7 @@ class ELibraryClient:
         json: Any = None,
         content: bytes | str | None = None,
         params: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> tuple[bytes, str | None]:
         """Return the body and the server-suggested filename, if any."""
         response = await self._send(
@@ -185,7 +190,7 @@ class ELibraryClient:
             json=json,
             content=content,
             params=params,
-            timeout=config.DOWNLOAD_TIMEOUT,
+            timeout=timeout if timeout is not None else config.DOWNLOAD_TIMEOUT,
         )
         if response.status_code >= 400:
             detail = _ferc_error_detail(response)
@@ -463,6 +468,198 @@ class ELibraryClient:
             expected_size=transmittal.file_size or None,
         )
 
+    async def download_bundle(
+        self,
+        *,
+        accession_numbers: list[str] | None = None,
+        file_ids: list[str] | None = None,
+        docket: str | None = None,
+        organize_by_accession: bool = True,
+        max_bytes: int = config.MAX_BUNDLE_BYTES,
+        max_files: int = config.MAX_BUNDLE_FILES,
+    ) -> BundleDownloadResult:
+        """Zip many public files in one eLibrary request.
+
+        eLibrary's Zip & Download endpoint accepts a list of file IDs across
+        accessions and returns a single archive. That is far cheaper than
+        calling download_file once per attachment (one metadata fetch + one
+        download + rate-limit gap each). FERC names members
+        ``{accession}_{filename}``; when organize_by_accession is true we
+        rewrite them to ``{accession}/{filename}`` folders.
+        """
+        accessions = [a.strip() for a in (accession_numbers or []) if a and a.strip()]
+        ids = [i.strip() for i in (file_ids or []) if i and i.strip()]
+        docket = (docket or "").strip() or None
+        if not accessions and not ids and not docket:
+            raise ValueError(
+                "download_bundle requires accession_numbers, file_ids, and/or docket"
+            )
+
+        selected: list[str] = []
+        seen: set[str] = set()
+        accession_set: set[str] = set()
+        skipped_accessions: list[str] = []
+        expected_total = 0
+        files_capped = False
+
+        def _take(file_id: str, accession: str = "", size: int = 0) -> bool:
+            nonlocal files_capped, expected_total
+            if not file_id or file_id in seen:
+                return True
+            if len(selected) >= max_files:
+                files_capped = True
+                return False
+            seen.add(file_id)
+            selected.append(file_id)
+            if accession:
+                accession_set.add(accession)
+            expected_total += max(size, 0)
+            return True
+
+        for file_id in ids:
+            if not _take(file_id):
+                break
+
+        for accession in accessions:
+            if files_capped:
+                break
+            filing = await self.get_filing(accession)
+            if filing.availability.lower() != "public":
+                skipped_accessions.append(accession)
+                continue
+            for item in filing.files:
+                if not _take(item.file_id, accession, item.file_size):
+                    break
+
+        if docket and not files_capped:
+            await self._collect_docket_file_ids(
+                docket, take=_take, already_capped=lambda: files_capped
+            )
+
+        if not selected:
+            return BundleDownloadResult(
+                path="",
+                size=0,
+                file_name="",
+                file_count=0,
+                accession_numbers=sorted(accession_set),
+                file_ids=[],
+                organized_by_accession=organize_by_accession,
+                files_capped=files_capped,
+                skipped_accessions=skipped_accessions,
+                skipped=True,
+                skip_reason="No public files matched the request",
+            )
+
+        if expected_total and expected_total > max_bytes:
+            return BundleDownloadResult(
+                path="",
+                size=expected_total,
+                file_name="",
+                file_count=len(selected),
+                accession_numbers=sorted(accession_set),
+                file_ids=selected,
+                organized_by_accession=organize_by_accession,
+                expected_size=expected_total,
+                files_capped=files_capped,
+                skipped_accessions=skipped_accessions,
+                skipped=True,
+                skip_reason=(
+                    f"Estimated payload is {expected_total} bytes, over the "
+                    f"{max_bytes} byte cap"
+                ),
+            )
+
+        body, suggested = await self._request_bytes(
+            "POST",
+            "File/DownloadP8File",
+            json={
+                "FileType": "",
+                "accession": "",
+                "fileid": 0,
+                "FileIDAll": "",
+                "fileidLst": selected,
+                "Islegacy": False,
+            },
+            timeout=config.BUNDLE_DOWNLOAD_TIMEOUT,
+        )
+
+        if organize_by_accession:
+            body = folderize_zip(body)
+
+        zip_accessions = accessions_in_zip(body) or sorted(accession_set)
+        self._download_dir.mkdir(parents=True, exist_ok=True)
+        dest_dir = self._download_dir / "bundles"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        filename = _safe_name(suggested or "") or _bundle_filename(
+            zip_accessions, len(selected)
+        )
+        if not filename.lower().endswith(".zip"):
+            filename = f"{filename}.zip"
+        path = dest_dir / filename
+
+        if len(body) > max_bytes:
+            return BundleDownloadResult(
+                path="",
+                size=len(body),
+                file_name=filename,
+                file_count=len(selected),
+                accession_numbers=zip_accessions,
+                file_ids=selected,
+                organized_by_accession=organize_by_accession,
+                expected_size=expected_total or None,
+                files_capped=files_capped,
+                skipped_accessions=skipped_accessions,
+                skipped=True,
+                skip_reason=(
+                    f"Downloaded payload is {len(body)} bytes, over the "
+                    f"{max_bytes} byte cap"
+                ),
+            )
+
+        path.write_bytes(body)
+        return BundleDownloadResult(
+            path=str(path.resolve()),
+            size=len(body),
+            file_name=filename,
+            file_count=len(selected),
+            accession_numbers=zip_accessions,
+            file_ids=selected,
+            organized_by_accession=organize_by_accession,
+            expected_size=expected_total or None,
+            files_capped=files_capped,
+            skipped_accessions=skipped_accessions,
+        )
+
+    async def _collect_docket_file_ids(
+        self,
+        docket: str,
+        *,
+        take,
+        already_capped,
+    ) -> None:
+        """Pull public file IDs for a docket via search (has avail codes)."""
+        page = 1
+        while not already_capped() and page <= config.MAX_CROSS_REFERENCE_PAGES:
+            parsed, _, _ = await self.search(
+                docket=docket, page=page, limit=config.MAX_SEARCH_LIMIT
+            )
+            if not parsed.search_hits:
+                break
+            for hit in parsed.search_hits:
+                if (hit.avail_code or "P").lower() not in config.PUBLIC_AVAIL_CODES:
+                    continue
+                for transmittal in hit.transmittals:
+                    if not take(
+                        transmittal.file_id,
+                        hit.accession_number,
+                        transmittal.file_size,
+                    ):
+                        return
+            if page * config.MAX_SEARCH_LIMIT >= parsed.total_hits:
+                break
+            page += 1
+
     def _write_download(
         self,
         path: Path,
@@ -521,7 +718,7 @@ class ELibraryClient:
         max_dockets: int = config.COLLECT_MAX_DOCKETS,
         max_filings_per_docket: int = config.COLLECT_MAX_FILINGS_PER_DOCKET,
         max_downloads: int = config.COLLECT_MAX_DOWNLOADS,
-        max_download_bytes: int = config.MAX_DOWNLOAD_BYTES,
+        max_download_bytes: int = config.MAX_BUNDLE_BYTES,
     ) -> RelatedCollection:
         parsed, _summaries, dates = await self.search(
             query=query,
@@ -549,12 +746,27 @@ class ELibraryClient:
             groups.append(sheet)
 
         downloads: list[DownloadResult] = []
+        bundle: BundleDownloadResult | None = None
         if download:
-            downloads = await self._download_from_hits(
+            bundle = await self._bundle_from_hits(
                 parsed.search_hits,
-                max_downloads=max_downloads,
+                max_files=max_downloads,
                 max_bytes=max_download_bytes,
             )
+            if bundle and not bundle.skipped and bundle.path:
+                downloads = [
+                    DownloadResult(
+                        accession_number=",".join(bundle.accession_numbers[:3])
+                        + ("…" if len(bundle.accession_numbers) > 3 else ""),
+                        path=bundle.path,
+                        size=bundle.size,
+                        content_type=bundle.content_type,
+                        file_name=bundle.file_name,
+                        url="",
+                        is_bundle=True,
+                        expected_size=bundle.expected_size,
+                    )
+                ]
 
         return RelatedCollection(
             query=query,
@@ -569,34 +781,45 @@ class ELibraryClient:
             filings_capped_per_docket=max_filings_per_docket,
             groups=groups,
             downloads=downloads,
+            bundle=bundle,
         )
 
-    async def _download_from_hits(
+    async def _bundle_from_hits(
         self,
         hits: list[SearchHit],
         *,
-        max_downloads: int,
+        max_files: int,
         max_bytes: int,
-    ) -> list[DownloadResult]:
-        results: list[DownloadResult] = []
+    ) -> BundleDownloadResult:
+        """One Zip & Download for public files already present on search hits."""
+        file_ids: list[str] = []
+        seen: set[str] = set()
         for hit in hits:
-            if len(results) >= max_downloads:
-                break
             if (hit.avail_code or "P").lower() not in config.PUBLIC_AVAIL_CODES:
                 continue
             for transmittal in hit.transmittals:
-                if len(results) >= max_downloads:
-                    break
-                if not transmittal.file_id:
+                if not transmittal.file_id or transmittal.file_id in seen:
                     continue
-                result = await self.download_file(
-                    hit.accession_number,
-                    file_id=transmittal.file_id,
-                    format="native",
-                    max_bytes=max_bytes,
-                )
-                results.append(result)
-        return results
+                seen.add(transmittal.file_id)
+                file_ids.append(transmittal.file_id)
+                if len(file_ids) >= max_files:
+                    break
+            if len(file_ids) >= max_files:
+                break
+        if not file_ids:
+            return BundleDownloadResult(
+                path="",
+                size=0,
+                file_name="",
+                file_count=0,
+                skipped=True,
+                skip_reason="No public files on the search hits",
+            )
+        return await self.download_bundle(
+            file_ids=file_ids,
+            max_files=max_files,
+            max_bytes=max_bytes,
+        )
 
     def _build_search_payload(
         self,
@@ -812,6 +1035,60 @@ def _parse_iso_date(value: str) -> date:
     raise ValueError(
         f"Unrecognized date: {value}. Use YYYY-MM-DD or MM/DD/YYYY."
     )
+
+
+def folderize_zip(body: bytes) -> bytes:
+    """Rewrite FERC's flat ``accession_filename`` members into folders.
+
+    eLibrary's Zip & Download names every member ``{YYYYMMDD-NNNN}_{name}``.
+    That is readable but awkward for browsing; this turns it into
+    ``{YYYYMMDD-NNNN}/{name}`` without re-compressing payloads (PDFs rarely
+    shrink).
+    """
+    if body[:2] != b"PK":
+        return body
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(body)) as src, zipfile.ZipFile(
+        out, "w", compression=zipfile.ZIP_STORED
+    ) as dst:
+        for info in src.infolist():
+            name = info.filename
+            match = _ACCESSION_ZIP_PREFIX.match(name)
+            new_name = f"{match.group(1)}/{match.group(2)}" if match else name
+            # Preserve directory entries if FERC ever sends them.
+            if name.endswith("/"):
+                dst.writestr(new_name if new_name.endswith("/") else new_name + "/", b"")
+                continue
+            dst.writestr(new_name, src.read(info.filename))
+    return out.getvalue()
+
+
+def accessions_in_zip(body: bytes) -> list[str]:
+    """Distinct accession numbers found in zip member names."""
+    if body[:2] != b"PK":
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+    with zipfile.ZipFile(io.BytesIO(body)) as zf:
+        for name in zf.namelist():
+            match = _ACCESSION_ZIP_PREFIX.match(name) or re.match(
+                r"^(\d{8}-\d{4})/", name
+            )
+            if not match:
+                continue
+            accession = match.group(1)
+            if accession not in seen:
+                seen.add(accession)
+                found.append(accession)
+    return found
+
+
+def _bundle_filename(accessions: list[str], file_count: int) -> str:
+    if len(accessions) == 1:
+        return f"{accessions[0]}_{file_count}files.zip"
+    if accessions:
+        return f"bundle_{accessions[0]}_plus{len(accessions) - 1}_{file_count}files.zip"
+    return f"bundle_{file_count}files.zip"
 
 
 def _safe_name(name: str) -> str:

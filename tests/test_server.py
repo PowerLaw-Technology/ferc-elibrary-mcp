@@ -36,6 +36,7 @@ async def test_tools_are_registered(elibrary):
             "get_filing",
             "list_files",
             "download_file",
+            "download_bundle",
             "collect_related",
         }
 

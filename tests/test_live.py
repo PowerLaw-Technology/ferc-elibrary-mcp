@@ -81,6 +81,25 @@ async def test_live_native_download_is_single_file_not_bundle(tmp_path):
 
 
 @pytest.mark.live
+async def test_live_download_bundle_cross_accession_folderized(tmp_path):
+    """One Zip & Download request should span accessions with folder members."""
+    import zipfile
+
+    async with ELibraryClient(download_dir=tmp_path, rate_limit_seconds=0.5) as client:
+        a1 = await client.get_filing("20260716-5098")
+        a2 = await client.get_filing("20201119-5202")
+        ids = [a1.files[0].file_id, a2.files[0].file_id]
+        result = await client.download_bundle(file_ids=ids)
+    assert result.skipped is False
+    assert result.file_count == 2
+    assert Path(result.path).exists()
+    with zipfile.ZipFile(result.path) as zf:
+        names = zf.namelist()
+    assert any(n.startswith("20260716-5098/") for n in names)
+    assert any(n.startswith("20201119-5202/") for n in names)
+
+
+@pytest.mark.live
 async def test_live_phrase_search_beats_term_search():
     async with ELibraryClient(rate_limit_seconds=0.5) as client:
         loose, _, _l = await client.search(

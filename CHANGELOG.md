@@ -4,7 +4,8 @@
 
 Initial release: MCP server and async Python client for the public FERC eLibrary JSON API.
 
-- Tools: `search_filings`, `get_docket`, `get_filing`, `list_files`, `download_file`, `collect_related`
+- Tools: `search_filings`, `get_docket`, `get_filing`, `list_files`, `download_file`, `download_bundle`, `collect_related`
+- `download_bundle`: one Zip & Download request for many files/accessions, rewritten into per-accession folders
 - Scope-aware date filtering (no silent 60-day truncation on named dockets/accessions)
 - Docket sheet deduplication, client-side paging, and issued-date cross-reference
 - Phrase / all / any search modes and description vs full-text scope

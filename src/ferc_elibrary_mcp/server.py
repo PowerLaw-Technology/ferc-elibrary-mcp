@@ -26,9 +26,12 @@ mcp = FastMCP(
         "Search the public FERC eLibrary for dockets and filings. "
         "Use search_filings for keywords or document types, get_docket for a docket "
         "sheet of related filings, get_filing/list_files for one accession, "
-        "download_file to save a public document locally, and collect_related to "
+        "download_file for one public file (or one accession zip/pdf), "
+        "download_bundle to Zip & Download many public files across accessions "
+        "in one archive with per-accession folders, and collect_related to "
         "search a term and gather related docket filings. Only public documents "
-        "can be downloaded. Dates use YYYY-MM-DD. Prefer pagination over huge dumps."
+        "can be downloaded. Dates use YYYY-MM-DD. Prefer download_bundle over "
+        "many download_file calls. Prefer pagination over huge dumps."
     ),
 )
 
@@ -263,6 +266,41 @@ async def download_file(
 
 
 @mcp.tool
+async def download_bundle(
+    accession_numbers: list[str] | None = None,
+    file_ids: list[str] | None = None,
+    docket: str | None = None,
+    organize_by_accession: bool = True,
+) -> dict[str, Any]:
+    """Zip many public files into one archive under FERC_DOWNLOAD_DIR/bundles.
+
+    Prefer this over repeated download_file calls. eLibrary's Zip & Download
+    accepts many file IDs in a single request (including across accessions), so
+    one call replaces N metadata lookups + N downloads + N rate-limit waits.
+
+    Provide any combination of accession_numbers (all public files on each),
+    file_ids (exact attachments), and/or docket (public files found via search
+    on that docket). Default organize_by_accession=true rewrites FERC's flat
+    ``accession_filename`` members into ``accession/filename`` folders.
+
+    Caps: 100 files and 500 MB by default (FERC_MAX_BUNDLE_FILES /
+    FERC_MAX_BUNDLE_BYTES). Privileged/CEII accessions are skipped and listed
+    in skipped_accessions. Does not return file bytes.
+    """
+    try:
+        result = await get_client().download_bundle(
+            accession_numbers=accession_numbers,
+            file_ids=file_ids,
+            docket=docket,
+            organize_by_accession=organize_by_accession,
+        )
+    except Exception as exc:
+        _tool_error(exc)
+        raise
+    return _dump(result)
+
+
+@mcp.tool
 async def collect_related(
     query: str | None = None,
     document_type: str | None = None,
@@ -280,7 +318,9 @@ async def collect_related(
 
     Caps results at 10 dockets and 50 filings per docket, and reports
     dockets_capped plus filings_capped_per_docket so truncation is visible. If
-    download is true, saves up to 10 public files under 25 MB each.
+    download is true, Zip & Downloads up to 10 public files from the search hits
+    into one folderized archive (see download_bundle) rather than fetching each
+    file individually.
 
     match, search_in, date_field, and the date-defaulting rules behave as in
     search_filings: supplying docket skips the 60-day default, and the response

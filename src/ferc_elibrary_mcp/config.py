@@ -65,6 +65,15 @@ COLLECT_MAX_FILINGS_PER_DOCKET = 50
 COLLECT_MAX_DOWNLOADS = 10
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 
+# Cross-accession Zip & Download: eLibrary accepts many file IDs in one
+# DownloadP8File call (UI allows up to ~10 GB). Cap below that so a runaway
+# collect cannot fill the disk; raise via max_bytes if needed.
+MAX_BUNDLE_BYTES = int(
+    os.environ.get("FERC_MAX_BUNDLE_BYTES", str(500 * 1024 * 1024))
+)
+MAX_BUNDLE_FILES = int(os.environ.get("FERC_MAX_BUNDLE_FILES", "100"))
+BUNDLE_DOWNLOAD_TIMEOUT = float(os.environ.get("FERC_BUNDLE_TIMEOUT_SECONDS", "300"))
+
 PUBLIC_AVAIL_CODES = {"p"}
 RESTRICTED_AVAIL = {
     "c": "CEII",
