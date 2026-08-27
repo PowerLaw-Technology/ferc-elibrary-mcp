@@ -1,0 +1,20 @@
+# Keep the Claude Desktop bundle small: source + lockfile, not tests or tooling.
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+.ruff_cache/
+.coverage
+htmlcov/
+.github/
+.cursor/
+tests/
+dist/
+build/
+server/lib/
+server/venv/
+*.mcpb
+*.log
+.DS_Store
