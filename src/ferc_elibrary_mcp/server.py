@@ -26,12 +26,16 @@ mcp = FastMCP(
         "Search the public FERC eLibrary for dockets and filings. "
         "Use search_filings for keywords or document types, get_docket for a docket "
         "sheet of related filings, get_filing/list_files for one accession, "
+        "get_filing_text to download a public attachment and return its plain text "
+        "(required for summarizing comments, orders, or agreements — download_file "
+        "only writes a local path that you cannot open), "
         "download_file for one public file (or one accession zip/pdf), "
         "download_bundle to Zip & Download many public files across accessions "
         "in one archive with per-accession folders, and collect_related to "
         "search a term and gather related docket filings. Only public documents "
         "can be downloaded. Dates use YYYY-MM-DD. Prefer download_bundle over "
-        "many download_file calls. Prefer pagination over huge dumps."
+        "many download_file calls when saving files; prefer get_filing_text when "
+        "you need to read substance. Prefer pagination over huge dumps."
     ),
 )
 
@@ -234,6 +238,35 @@ async def list_files(accession_number: str) -> dict[str, Any]:
         "nonpublic_counterpart_basis": filing.nonpublic_counterpart_basis,
         "files": [_dump(item) for item in filing.files],
     }
+
+
+@mcp.tool
+async def get_filing_text(
+    accession_number: str,
+    file_id: str | None = None,
+    max_chars: int = config.DEFAULT_EXTRACT_CHARS,
+) -> dict[str, Any]:
+    """Download one public attachment and return extracted plain text.
+
+    Use this to read or summarize filings (comments, orders, agreements).
+    download_file only saves a path under FERC_DOWNLOAD_DIR; sandboxed and
+    remote clients cannot open that path, so they must use this tool instead.
+
+    Supports PDF, DOCX, and plain text. Text is capped (default 20k characters;
+    max 100k) and truncated is true when clipped. Privileged/CEII/protected
+    filings are refused. Call list_files first when an accession has multiple
+    attachments.
+    """
+    try:
+        result = await get_client().get_filing_text(
+            accession_number,
+            file_id=file_id,
+            max_chars=max_chars,
+        )
+    except Exception as exc:
+        _tool_error(exc)
+        raise
+    return _dump(result)
 
 
 @mcp.tool

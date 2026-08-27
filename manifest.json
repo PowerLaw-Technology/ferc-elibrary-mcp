@@ -54,6 +54,10 @@
       "description": "List files attached to an accession. Call before downloading."
     },
     {
+      "name": "get_filing_text",
+      "description": "Download one public attachment and return extracted plain text for reading or summarizing."
+    },
+    {
       "name": "download_file",
       "description": "Save one public file, a one-accession zip, or a generated PDF to the download folder."
     },

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `get_filing_text`: download a public attachment and return extracted plain text (PDF/DOCX/text) so agents can summarize filings without filesystem access
+
 ## 0.1.2 — 2026-08-27
 
 - `download_file(format=zip)` unwraps single-member archives and refreshes `content_type` / `is_bundle` / `expected_size` for the saved file (including bare `.docx` OOXML)
