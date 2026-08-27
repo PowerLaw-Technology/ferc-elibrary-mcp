@@ -35,6 +35,7 @@ async def test_tools_are_registered(elibrary):
             "get_docket",
             "get_filing",
             "list_files",
+            "get_filing_text",
             "download_file",
             "download_bundle",
             "collect_related",
@@ -208,6 +209,22 @@ async def test_get_docket_tool_reports_count_basis_and_scope(
     assert data["availability_scope"] == "all"
     assert data["page_base"] == 1
     assert all("docket_numbers" in f for f in data["filings"])
+
+
+async def test_get_filing_text_tool(httpx_mock: HTTPXMock, elibrary, tmp_path):
+    from tests.test_textextract import _hand_rolled_pdf
+
+    pdf = _hand_rolled_pdf("Comment of ClearPath on RM26-2")
+    httpx_mock.add_response(url=SEARCH_URL, json=SAMPLE_SEARCH)
+    httpx_mock.add_response(url=DOWNLOAD_URL, content=pdf)
+    async with Client(mcp) as session:
+        result = await session.call_tool(
+            "get_filing_text",
+            {"accession_number": "20201119-5202", "max_chars": 5000},
+        )
+    assert result.data["extractor"] == "pypdf"
+    assert result.data["skipped"] is False
+    assert result.data["char_count"] > 0
 
 
 async def test_download_file_tool_rejects_privileged(httpx_mock: HTTPXMock, elibrary):

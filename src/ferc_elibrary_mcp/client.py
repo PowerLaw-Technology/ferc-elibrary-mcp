@@ -36,11 +36,13 @@ from ferc_elibrary_mcp.models import (
     SearchScope,
     SkippedAccession,
     SortOrder,
+    TextExtractionResult,
     Transmittal,
     file_list_url,
     hit_to_detail,
     hit_to_summary,
 )
+from ferc_elibrary_mcp.textextract import extract_text
 
 _UNSAFE_NAME = re.compile(r"[^\w.\- ]+", re.UNICODE)
 _ACCESSION_ZIP_PREFIX = re.compile(r"^(\d{8}-\d{4})_(.+)$")
@@ -492,6 +494,83 @@ class ELibraryClient:
             filename,
             max_bytes=max_bytes,
             expected_size=transmittal.file_size or None,
+        )
+
+    async def get_filing_text(
+        self,
+        accession_number: str,
+        *,
+        file_id: str | None = None,
+        max_chars: int = config.DEFAULT_EXTRACT_CHARS,
+        max_bytes: int = config.MAX_EXTRACT_FILE_BYTES,
+    ) -> TextExtractionResult:
+        """Download one public attachment and return extracted plain text.
+
+        Use this when an agent needs to read or summarize a filing. download_file
+        only writes a path on disk, which sandboxed / remote clients cannot open.
+        """
+        download = await self.download_file(
+            accession_number,
+            file_id=file_id,
+            format="native",
+            max_bytes=max_bytes,
+        )
+        if download.skipped:
+            return TextExtractionResult(
+                accession_number=accession_number,
+                file_name=download.file_name,
+                file_id=file_id,
+                path=download.path,
+                content_type=download.content_type,
+                text="",
+                char_count=0,
+                truncated=False,
+                extractor="none",
+                url=download.url,
+                skipped=True,
+                skip_reason=download.skip_reason,
+            )
+        if download.is_bundle:
+            return TextExtractionResult(
+                accession_number=accession_number,
+                file_name=download.file_name,
+                file_id=file_id,
+                path=download.path,
+                content_type=download.content_type,
+                text="",
+                char_count=0,
+                truncated=False,
+                extractor="unsupported",
+                url=download.url,
+                skipped=True,
+                skip_reason=(
+                    "Download returned a multi-file archive. Pass file_id for one "
+                    "attachment, or use format=pdf on download_file then extract."
+                ),
+            )
+
+        body = Path(download.path).read_bytes()
+        text, meta = extract_text(
+            body,
+            download.file_name,
+            content_type=download.content_type,
+            max_chars=max_chars,
+        )
+        skipped = bool(meta.get("skip_reason"))
+        return TextExtractionResult(
+            accession_number=accession_number,
+            file_name=download.file_name,
+            file_id=file_id,
+            path=download.path,
+            content_type=download.content_type,
+            text=text,
+            char_count=int(meta["char_count"]),
+            truncated=bool(meta["truncated"]),
+            page_count=meta.get("page_count") if isinstance(meta.get("page_count"), int) else None,
+            extractor=str(meta["extractor"]),
+            url=download.url,
+            skipped=skipped,
+            skip_reason=meta.get("skip_reason") if isinstance(meta.get("skip_reason"), str) else None,
         )
 
     async def download_bundle(

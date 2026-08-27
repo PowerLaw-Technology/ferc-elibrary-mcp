@@ -215,6 +215,28 @@ class SkippedAccession(BaseModel):
     category: str = "not_found"
 
 
+class TextExtractionResult(BaseModel):
+    """Plain text extracted from a public filing attachment.
+
+    Agents cannot open paths under FERC_DOWNLOAD_DIR, so summarization must use
+    this payload rather than download_file alone.
+    """
+
+    accession_number: str
+    file_name: str
+    file_id: str | None = None
+    path: str
+    content_type: str
+    text: str
+    char_count: int
+    truncated: bool = False
+    page_count: int | None = None
+    extractor: str
+    url: str
+    skipped: bool = False
+    skip_reason: str | None = None
+
+
 class BundleDownloadResult(BaseModel):
     """One Zip & Download archive spanning one or many accessions."""
 

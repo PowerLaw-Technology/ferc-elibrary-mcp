@@ -90,6 +90,7 @@ Downloads go under `FERC_DOWNLOAD_DIR` (default `~/Downloads/ferc-elibrary`). Op
 | `get_docket` | Docket sheet: related filings, applicants, accession numbers. See [Docket sheets vs search](#docket-sheets-vs-search) for how it differs from `search_filings`. |
 | `get_filing` | Metadata for one accession (`YYYYMMDD-NNNN`). |
 | `list_files` | Files attached to an accession (call before downloading). |
+| `get_filing_text` | Download one public attachment and **return extracted plain text** (PDF/DOCX/text). Use this to read or summarize filings — `download_file` only writes a local path. |
 | `download_file` | Save a **public** single file, one-accession zip, or generated PDF under `FERC_DOWNLOAD_DIR`. Does not return bytes. |
 | `download_bundle` | **Preferred for bulk:** Zip & Download many public files across accessions in one request into `FERC_DOWNLOAD_DIR/bundles`, with per-accession folders. |
 | `collect_related` | Search a term or document type, then group related filings by docket (capped at 10 dockets × 50 filings). Optional `download` uses `download_bundle` (up to 10 files). |

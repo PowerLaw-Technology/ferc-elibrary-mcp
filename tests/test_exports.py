@@ -18,6 +18,7 @@ from ferc_elibrary_mcp import (
     SearchHit,
     SearchResponse,
     SkippedAccession,
+    TextExtractionResult,
     Transmittal,
     __all__,
     main,
@@ -44,6 +45,7 @@ def test_public_exports_include_client_and_models() -> None:
         "SearchHit",
         "SearchResponse",
         "SkippedAccession",
+        "TextExtractionResult",
         "Transmittal",
         "main",
         "mcp",
@@ -71,6 +73,7 @@ def test_public_exports_include_client_and_models() -> None:
             SearchHit,
             SearchResponse,
             SkippedAccession,
+            TextExtractionResult,
             Transmittal,
         )
     )

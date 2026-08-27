@@ -104,6 +104,13 @@ COLLECT_MAX_FILINGS_PER_DOCKET = 50
 COLLECT_MAX_DOWNLOADS = 10
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 
+# Text returned through MCP tool responses (agents cannot open local paths).
+DEFAULT_EXTRACT_CHARS = int(os.environ.get("FERC_DEFAULT_EXTRACT_CHARS", "20000"))
+MAX_EXTRACT_CHARS = int(os.environ.get("FERC_MAX_EXTRACT_CHARS", "100000"))
+MAX_EXTRACT_FILE_BYTES = int(
+    os.environ.get("FERC_MAX_EXTRACT_FILE_BYTES", str(15 * 1024 * 1024))
+)
+
 # Cross-accession Zip & Download: eLibrary accepts many file IDs in one
 # DownloadP8File call (UI allows up to ~10 GB). Cap below that so a runaway
 # collect cannot fill the disk; raise via max_bytes if needed.

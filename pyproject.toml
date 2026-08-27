@@ -31,6 +31,7 @@ dependencies = [
     "fastmcp>=3.4.7",
     "httpx>=0.28.1",
     "pydantic>=2.13.4",
+    "pypdf>=6.16.2",
 ]
 
 [project.urls]

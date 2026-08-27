@@ -20,6 +20,7 @@ from ferc_elibrary_mcp.models import (
     SearchHit,
     SearchResponse,
     SkippedAccession,
+    TextExtractionResult,
     Transmittal,
 )
 from ferc_elibrary_mcp.server import main, mcp
@@ -42,6 +43,7 @@ __all__ = [
     "SearchHit",
     "SearchResponse",
     "SkippedAccession",
+    "TextExtractionResult",
     "Transmittal",
     "main",
     "mcp",
