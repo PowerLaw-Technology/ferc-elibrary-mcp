@@ -106,24 +106,22 @@ Add the server to `~/Library/Application Support/Claude/claude_desktop_config.js
 {
   "mcpServers": {
     "ferc-elibrary": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "/Users/zoschin/Projects/ferc-elibrary-mcp",
-        "run",
-        "ferc-elibrary-mcp"
-      ],
+      "command": "/Users/zoschin/Projects/ferc-elibrary-mcp/.venv/bin/ferc-elibrary-mcp",
+      "args": [],
       "env": {
-        "FERC_DOWNLOAD_DIR": "/Users/zoschin/Downloads/ferc-elibrary"
+        "FERC_DOWNLOAD_DIR": "/Users/zoschin/Downloads/ferc-elibrary",
+        "FERC_MCP_IDLE_TIMEOUT_SECONDS": "14400"
       }
     }
   }
 }
 ```
 
+Use the absolute path to the venv entry point rather than `uv`. Claude Desktop is a GUI app and does not inherit your shell `PATH`, so a bare `uv` resolves only if it happens to sit in a system directory; on a Homebrew install it does not.
+
 Fully quit and reopen Claude Desktop. Confirm the server under **Settings → Developer**.
 
-Downloads default to `~/Downloads/ferc-elibrary` if `FERC_DOWNLOAD_DIR` is unset.
+Downloads default to `~/Downloads/ferc-elibrary` if `FERC_DOWNLOAD_DIR` is unset. See [Orphaned server processes](#orphaned-server-processes) for `FERC_MCP_IDLE_TIMEOUT_SECONDS`; remove it to restore the default of never self-terminating.
 
 ## Example prompts
 
@@ -140,6 +138,21 @@ uv run pytest -m live   # optional smoke test against the live public API
 ```
 
 ## Limits
+
+## Orphaned server processes
+
+Claude Desktop occasionally spawns two stdio servers within a second of each other and talks to only one. It does not close stdin on the abandoned instance, so that process never sees EOF and idles forever — one leaked pair per day in practice, and tool calls that get routed to a stale instance hang until the client's own timeout rather than failing.
+
+The server itself is not at fault: it exits cleanly on stdin EOF (exit code 0) and on `SIGTERM`. An abandoned instance simply has no way to notice nobody is listening.
+
+Set `FERC_MCP_IDLE_TIMEOUT_SECONDS` to have an instance that has received no messages for that long shut itself down via `SIGTERM`. Any request resets the timer, so an in-use server is unaffected; only a fully abandoned one is reaped. It is **disabled by default** (`0`), because a healthy-but-unused server would also exit and recovery then depends on the client respawning it. The Claude Desktop config below sets 4 hours, comfortably longer than any gap in an active session.
+
+To check for and clear strays by hand:
+
+```bash
+ps -eo pid,etime,command | grep '[f]erc-elibrary-mcp'
+kill -TERM <pid>   # they are idle, not wedged; no -9 needed
+```
 
 - Public documents only. No FERC login, CEII, privileged, or protected files.
 - File bytes are written to disk, not sent back to Claude.

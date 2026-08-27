@@ -35,6 +35,14 @@ DOCKET_SHEET_FETCH_LIMIT = 5000
 # Paging bound when resolving a docket sheet's issuance window through search.
 MAX_CROSS_REFERENCE_PAGES = 20
 
+# Claude Desktop sometimes spawns duplicate stdio servers and abandons one
+# without closing its stdin, so the abandoned process never sees EOF and idles
+# forever. Set a positive number of seconds to have an instance that has
+# received no traffic shut itself down. Disabled by default because a healthy
+# but merely unused server would also exit, and recovery then depends on the
+# client respawning it.
+IDLE_SHUTDOWN_SECONDS = float(os.environ.get("FERC_MCP_IDLE_TIMEOUT_SECONDS", "0"))
+
 # eLibrary silently returns zero hits for an unrecognized dateType, so only
 # these verified values may ever reach the wire.
 DATE_FIELD_TYPES = {"filed": "filed_date", "issued": "issued_date"}

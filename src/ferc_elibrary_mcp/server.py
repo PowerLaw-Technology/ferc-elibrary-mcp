@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import signal
+import threading
+import time
 from typing import Any
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware import Middleware
 
 from ferc_elibrary_mcp import config
 from ferc_elibrary_mcp.client import ELibraryClient
@@ -303,7 +307,41 @@ async def collect_related(
     return _dump(collection)
 
 
+class IdleShutdownMiddleware(Middleware):
+    """Record when the client last said anything."""
+
+    def __init__(self) -> None:
+        self.last_activity = time.monotonic()
+
+    async def on_message(self, context: Any, call_next: Any) -> Any:
+        self.last_activity = time.monotonic()
+        return await call_next(context)
+
+
+def _start_idle_watchdog(tracker: IdleShutdownMiddleware, timeout: float) -> None:
+    """Exit if the client stops talking to this instance entirely.
+
+    An abandoned instance never sees EOF because the client keeps its stdin
+    open, so it cannot notice on its own that nobody is listening. Shutdown
+    goes through SIGTERM, which is the same path a clean stop already takes.
+    """
+
+    def watch() -> None:
+        interval = max(1.0, min(60.0, timeout / 4))
+        while True:
+            time.sleep(interval)
+            if time.monotonic() - tracker.last_activity >= timeout:
+                signal.raise_signal(signal.SIGTERM)
+                return
+
+    threading.Thread(target=watch, name="ferc-idle-watchdog", daemon=True).start()
+
+
 def main() -> None:
+    if config.IDLE_SHUTDOWN_SECONDS > 0:
+        tracker = IdleShutdownMiddleware()
+        mcp.add_middleware(tracker)
+        _start_idle_watchdog(tracker, config.IDLE_SHUTDOWN_SECONDS)
     mcp.run(transport="stdio", show_banner=False)
 
 
