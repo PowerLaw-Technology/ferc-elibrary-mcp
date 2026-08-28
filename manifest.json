@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "ferc-elibrary",
   "display_name": "FERC eLibrary",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Search, cache, and read public FERC eLibrary filings from Claude Desktop.",
   "long_description": "Search the public FERC eLibrary, sync docket sheets into a shared document store, and read filings in bounded chunks.\n\n**Public documents only** — no FERC login, and no CEII, privileged, or protected content. Files are cached under the store root you choose (default: `Downloads/ferc-elibrary`). Use `read_document` with page or character bounds for large filings; never pull full text in one call.\n\nAsk Claude in plain language, for example:\n- Sync docket CP21-470 and show what is cached\n- Search within a 500-page order for \"surplus service\"\n- Download the public PDF for an accession number\n\nFERC does not publish an official developer API. This extension uses the same public website backend, which can change without notice.",
   "author": {

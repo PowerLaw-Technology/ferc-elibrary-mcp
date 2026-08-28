@@ -55,6 +55,10 @@ class ExtractionPipeline:
         text_path.parent.mkdir(parents=True, exist_ok=True)
         text_path.write_text(text, encoding="utf-8")
         pages_path.write_text(page_map_to_json(page_map), encoding="utf-8")
+        sync = getattr(self._store, "sync_file", None)
+        if callable(sync):
+            sync(text_path)
+            sync(pages_path)
 
         manifest = self._store.manifest(docket, accession)
         if manifest is not None:

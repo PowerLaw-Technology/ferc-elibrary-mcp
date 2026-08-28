@@ -3,10 +3,11 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+import hashlib
 
 BASE_URL = "https://elibrary.ferc.gov/eLibrarywebapi/api/"
 ELIBRARY_UI_BASE = "https://elibrary.ferc.gov/eLibrary"
-USER_AGENT = "ferc-elibrary-mcp/0.2.0 (public eLibrary research)"
+USER_AGENT = "ferc-elibrary-mcp/0.3.0 (public eLibrary research)"
 
 SEARCH_TIMEOUT = 30.0
 DOWNLOAD_TIMEOUT = 120.0
@@ -83,6 +84,40 @@ def resolve_store_root(raw: str | None = None) -> Path:
 
 STORE_BACKEND = os.environ.get("FERC_STORE_BACKEND", "local").strip().lower() or "local"
 DEFAULT_STORE_ROOT = DEFAULT_DOWNLOAD_DIR
+
+# Phase 2: S3 object store (optional boto3 extra).
+S3_STORE_URI = os.environ.get("FERC_STORE_ROOT", "") if STORE_BACKEND == "s3" else ""
+S3_CACHE_DIR = os.environ.get("FERC_S3_CACHE_DIR", "")
+
+# Phase 3: hosted HTTP — global FERC egress limiter (all orgs share one IP).
+GLOBAL_RATE_LIMIT_RPS = float(os.environ.get("FERC_GLOBAL_RATE_LIMIT_RPS", "0"))
+GLOBAL_RATE_LIMIT_BURST = int(os.environ.get("FERC_GLOBAL_RATE_LIMIT_BURST", "2"))
+
+# Per-org FERC quotas when HTTP auth is enabled: {"org-id": {"rps": 0.5, "burst": 2}}
+def _org_rate_limits() -> dict[str, dict[str, object]]:
+    raw = os.environ.get("FERC_ORG_RATE_LIMITS", "").strip()
+    if not raw:
+        return {}
+    import json
+
+    data = json.loads(raw)
+    return data if isinstance(data, dict) else {}
+
+
+ORG_RATE_LIMITS = _org_rate_limits()
+
+# HTTP server bind (Phase 3). stdio remains the default for Claude Desktop .mcpb.
+MCP_TRANSPORT = os.environ.get("FERC_MCP_TRANSPORT", "stdio").strip().lower() or "stdio"
+MCP_HOST = os.environ.get("FERC_MCP_HOST", "0.0.0.0")
+MCP_PORT = int(os.environ.get("FERC_MCP_PORT", "8000"))
+MCP_PATH = os.environ.get("FERC_MCP_PATH", "/mcp")
+
+
+def resolve_s3_cache_dir(s3_uri: str) -> Path:
+    if S3_CACHE_DIR.strip():
+        return Path(S3_CACHE_DIR).expanduser().resolve()
+    digest = hashlib.sha256(s3_uri.encode()).hexdigest()[:12]
+    return Path.home() / ".cache" / "ferc-elibrary" / f"s3-{digest}"
 
 DEFAULT_SEARCH_LIMIT = 25
 MAX_SEARCH_LIMIT = 100

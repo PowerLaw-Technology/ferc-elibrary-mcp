@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-08-28
+
+- **Phase 2:** S3 document store (`FERC_STORE_BACKEND=s3`, `FERC_STORE_ROOT=s3://bucket/prefix`); optional `boto3` extra
+- **Phase 3:** Streamable HTTP transport (`FERC_MCP_TRANSPORT=http`), bearer-token auth per org (`FERC_MCP_AUTH_TOKENS`), global and per-org FERC rate limits
+- Deployment guide: `docs/DEPLOYMENT.md` (self-contained in this repo)
+
 ## 0.2.0 — 2026-08-28
 
 - **v2 architecture:** FERC HTTP client with token-bucket rate limiting and HTTP 429 hard-backoff; document store with manifests and docket indexes; cache-first downloads

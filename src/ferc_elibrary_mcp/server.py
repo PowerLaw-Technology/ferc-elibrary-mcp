@@ -500,12 +500,26 @@ def _start_idle_watchdog(tracker: IdleShutdownMiddleware, timeout: float) -> thr
 def main() -> None:
     import os
 
+    from ferc_elibrary_mcp.http.auth_config import build_auth_provider
+    from ferc_elibrary_mcp.http.http_runtime import http_run_kwargs
+    from ferc_elibrary_mcp.http.org_middleware import OrgContextMiddleware
+
+    auth = build_auth_provider()
+    if auth is not None:
+        mcp.auth = auth
+        mcp.add_middleware(OrgContextMiddleware())
+
     if config.IDLE_SHUTDOWN_SECONDS > 0:
         tracker = IdleShutdownMiddleware()
         mcp.add_middleware(tracker)
         _start_idle_watchdog(tracker, config.IDLE_SHUTDOWN_SECONDS)
+
     transport = os.environ.get("FERC_MCP_TRANSPORT", "stdio").strip().lower() or "stdio"
-    mcp.run(transport=transport, show_banner=False)
+    if transport in {"http", "streamable-http", "sse"}:
+        kwargs = http_run_kwargs()
+        mcp.run(show_banner=False, **kwargs)
+    else:
+        mcp.run(transport="stdio", show_banner=False)
 
 
 if __name__ == "__main__":

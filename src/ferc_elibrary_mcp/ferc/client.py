@@ -7,6 +7,7 @@ import httpx
 
 from ferc_elibrary_mcp import config
 from ferc_elibrary_mcp.exceptions import ELibraryRequestError, RateLimitError
+from ferc_elibrary_mcp.ferc.global_limiter import throttle_ferc
 from ferc_elibrary_mcp.ferc.rate_limit import TokenBucketLimiter
 
 
@@ -64,6 +65,7 @@ class FercClient:
         client = self._ensure_http()
         last_status: int | None = None
         for attempt in range(config.MAX_RETRIES):
+            await throttle_ferc()
             await self._limiter.acquire()
             try:
                 response = await client.request(

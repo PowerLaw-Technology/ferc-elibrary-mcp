@@ -65,8 +65,12 @@ class ELibraryClient:
         self._ferc = FercClient(http=http, rps=rps)
         self._http = http
         self._owns_http = http is None
-        root = Path(download_dir) if download_dir is not None else config.resolve_store_root()
-        self._store = store or create_store(root)
+        if store is not None:
+            self._store = store
+        elif download_dir is not None:
+            self._store = create_store(download_dir)
+        else:
+            self._store = create_store()
         self._documents = DocumentService(self._store, self)
         self._sync = SyncService(self._store, self, self._documents)
         # Legacy alias used by older tests/config.

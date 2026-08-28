@@ -105,14 +105,21 @@ See [`skills/ferc-elibrary/SKILL.md`](skills/ferc-elibrary/SKILL.md) for the rec
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `FERC_STORE_BACKEND` | `local` | Store backend (`local`; `s3` in Phase 2) |
-| `FERC_STORE_ROOT` | `~/Downloads/ferc-elibrary` | Document store root (shared folder or S3 prefix) |
+| `FERC_STORE_BACKEND` | `local` | Store backend (`local` or `s3`) |
+| `FERC_STORE_ROOT` | `~/Downloads/ferc-elibrary` | Local path or `s3://bucket/prefix` |
 | `FERC_DOWNLOAD_DIR` | same as above | Legacy alias for store root |
+| `FERC_S3_CACHE_DIR` | auto | Local disk cache when using S3 |
 | `FERC_RATE_LIMIT_RPS` | `0.5` | Token-bucket requests per second |
 | `FERC_RATE_LIMIT_BURST` | `2` | Burst capacity |
 | `FERC_MAX_READ_CHARS` | `25000` | Per-call text cap for `read_document` |
 | `FERC_ENABLE_OCR` | `false` | Opt-in OCR for scanned PDFs (not yet implemented) |
-| `FERC_MCP_TRANSPORT` | `stdio` | MCP transport (`stdio` now; `http` in Phase 3) |
+| `FERC_MCP_TRANSPORT` | `stdio` | `stdio` (desktop) or `http` / `streamable-http` (hosted) |
+| `FERC_MCP_HOST` / `PORT` / `PATH` | `0.0.0.0` / `8000` / `/mcp` | HTTP bind settings |
+| `FERC_MCP_AUTH_TOKENS` | — | JSON map of org → bearer token (required for HTTP) |
+| `FERC_GLOBAL_RATE_LIMIT_RPS` | `0` | Firm-wide FERC egress cap (hosted mode) |
+| `FERC_ORG_RATE_LIMITS` | — | Per-org FERC quotas (JSON) |
+
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for S3 and hosted HTTP setup (this repo only — no external PowerLaw infra).
 
 Privileged, protected, and CEII documents are refused.
 
