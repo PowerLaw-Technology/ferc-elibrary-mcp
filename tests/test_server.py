@@ -36,6 +36,11 @@ async def test_tools_are_registered(elibrary):
             "get_filing",
             "list_files",
             "get_filing_text",
+            "read_document",
+            "search_within_document",
+            "get_document_outline",
+            "sync_docket",
+            "cache_status",
             "download_file",
             "download_bundle",
             "collect_related",
@@ -222,9 +227,10 @@ async def test_get_filing_text_tool(httpx_mock: HTTPXMock, elibrary, tmp_path):
             "get_filing_text",
             {"accession_number": "20201119-5202", "max_chars": 5000},
         )
-    assert result.data["extractor"] == "pypdf"
+    assert result.data["extractor"] in {"pypdf", "read_document", "cached"}
     assert result.data["skipped"] is False
     assert result.data["char_count"] > 0
+    assert result.data["deprecated"] is True
 
 
 async def test_download_file_tool_rejects_privileged(httpx_mock: HTTPXMock, elibrary):

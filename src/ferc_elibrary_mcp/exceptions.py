@@ -15,3 +15,11 @@ class FilingNotFoundError(ELibraryError):
 
 class RestrictedDocumentError(ELibraryError):
     """The filing is CEII, privileged, or protected and cannot be downloaded."""
+
+
+class RateLimitError(ELibraryError):
+    """FERC returned HTTP 429 or a ban-like response; back off before retrying."""
+
+    def __init__(self, message: str, *, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after

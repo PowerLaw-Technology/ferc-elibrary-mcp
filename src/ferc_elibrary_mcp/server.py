@@ -26,16 +26,15 @@ mcp = FastMCP(
         "Search the public FERC eLibrary for dockets and filings. "
         "Use search_filings for keywords or document types, get_docket for a docket "
         "sheet of related filings, get_filing/list_files for one accession, "
-        "get_filing_text to download a public attachment and return its plain text "
-        "(required for summarizing comments, orders, or agreements — download_file "
-        "only writes a local path that you cannot open), "
-        "download_file for one public file (or one accession zip/pdf), "
-        "download_bundle to Zip & Download many public files across accessions "
-        "in one archive with per-accession folders, and collect_related to "
-        "search a term and gather related docket filings. Only public documents "
-        "can be downloaded. Dates use YYYY-MM-DD. Prefer download_bundle over "
-        "many download_file calls when saving files; prefer get_filing_text when "
-        "you need to read substance. Prefer pagination over huge dumps."
+        "sync_docket to incrementally cache a docket, cache_status to inspect the store, "
+        "download_file to cache public files (never returns text), "
+        "download_bundle to Zip & Download many public files across accessions, "
+        "and collect_related to search a term and gather related docket filings. "
+        "To read document substance, never request full text. Use get_document_outline "
+        "and search_within_document to locate sections, then read_document with explicit "
+        "page or character bounds. get_filing_text is deprecated and bounded. "
+        "Only public documents can be downloaded. Dates use YYYY-MM-DD. "
+        "Prefer pagination over huge dumps."
     ),
 )
 
@@ -246,16 +245,11 @@ async def get_filing_text(
     file_id: str | None = None,
     max_chars: int = config.DEFAULT_EXTRACT_CHARS,
 ) -> dict[str, Any]:
-    """Download one public attachment and return extracted plain text.
+    """Deprecated alias for bounded read_document.
 
-    Use this to read or summarize filings (comments, orders, agreements).
-    download_file only saves a path under FERC_DOWNLOAD_DIR; sandboxed and
-    remote clients cannot open that path, so they must use this tool instead.
-
-    Supports PDF, DOCX, and plain text. Text is capped (default 20k characters;
-    max 100k) and truncated is true when clipped. Privileged/CEII/protected
-    filings are refused. Call list_files first when an accession has multiple
-    attachments.
+    Returns at most max_chars of extracted text and reports total_chars when
+    truncated. Prefer get_document_outline, search_within_document, and
+    read_document for large filings.
     """
     try:
         result = await get_client().get_filing_text(
@@ -266,7 +260,94 @@ async def get_filing_text(
     except Exception as exc:
         _tool_error(exc)
         raise
-    return _dump(result)
+    payload = _dump(result)
+    payload["deprecated"] = True
+    payload["use_instead"] = "read_document"
+    return payload
+
+
+@mcp.tool
+async def read_document(
+    accession_number: str,
+    filename: str,
+    pages: list[int] | None = None,
+    char_start: int | None = None,
+    char_end: int | None = None,
+    max_chars: int = config.MAX_READ_CHARS,
+) -> dict[str, Any]:
+    """Return bounded plain text from a cached filing attachment.
+
+    Never returns the full document unless it fits within max_chars. Responses
+    include total_chars, truncated, and next_char_start / next_page when clipped.
+    """
+    try:
+        return await get_client().read_document(
+            accession_number,
+            filename,
+            pages=pages,
+            char_start=char_start,
+            char_end=char_end,
+            max_chars=max_chars,
+        )
+    except Exception as exc:
+        _tool_error(exc)
+        raise
+
+
+@mcp.tool
+async def search_within_document(
+    accession_number: str,
+    filename: str,
+    query: str,
+    max_hits: int = 10,
+) -> dict[str, Any]:
+    """Search extracted text for a query and return passages with page/char offsets."""
+    try:
+        return await get_client().search_within_document(
+            accession_number,
+            filename,
+            query,
+            max_hits=max_hits,
+        )
+    except Exception as exc:
+        _tool_error(exc)
+        raise
+
+
+@mcp.tool
+async def get_document_outline(
+    accession_number: str,
+    filename: str,
+) -> dict[str, Any]:
+    """Return PDF bookmarks or a heuristic section map for a stored filing."""
+    try:
+        return await get_client().get_document_outline(accession_number, filename)
+    except Exception as exc:
+        _tool_error(exc)
+        raise
+
+
+@mcp.tool
+async def sync_docket(docket_number: str) -> dict[str, Any]:
+    """Incrementally fetch accessions missing from the document store for a docket."""
+    try:
+        return await get_client().sync_docket(docket_number)
+    except Exception as exc:
+        _tool_error(exc)
+        raise
+
+
+@mcp.tool
+async def cache_status(
+    docket: str | None = None,
+    accession: str | None = None,
+) -> dict[str, Any]:
+    """Report what the document store holds for a docket or accession."""
+    try:
+        return get_client().cache_status(docket=docket, accession=accession)
+    except Exception as exc:
+        _tool_error(exc)
+        raise
 
 
 @mcp.tool
@@ -415,11 +496,14 @@ def _start_idle_watchdog(tracker: IdleShutdownMiddleware, timeout: float) -> Non
 
 
 def main() -> None:
+    import os
+
     if config.IDLE_SHUTDOWN_SECONDS > 0:
         tracker = IdleShutdownMiddleware()
         mcp.add_middleware(tracker)
         _start_idle_watchdog(tracker, config.IDLE_SHUTDOWN_SECONDS)
-    mcp.run(transport="stdio", show_banner=False)
+    transport = os.environ.get("FERC_MCP_TRANSPORT", "stdio").strip().lower() or "stdio"
+    mcp.run(transport=transport, show_banner=False)
 
 
 if __name__ == "__main__":

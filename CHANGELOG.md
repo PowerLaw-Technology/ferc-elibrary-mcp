@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-08-28
+
+- **v2 architecture:** FERC HTTP client with token-bucket rate limiting and HTTP 429 hard-backoff; document store with manifests and docket indexes; cache-first downloads
+- **New tools:** `read_document`, `search_within_document`, `get_document_outline`, `sync_docket`, `cache_status`
+- **Large documents:** extract-once sidecars (`.extracted.txt`, `.pages.json`); bounded reads with explicit truncation metadata
+- `get_filing_text` deprecated as bounded alias for `read_document`
+- Config: `FERC_STORE_BACKEND`, `FERC_STORE_ROOT`, `FERC_RATE_LIMIT_RPS`, `FERC_MAX_READ_CHARS` (`FERC_DOWNLOAD_DIR` still supported)
+- Companion skill at `skills/ferc-elibrary/SKILL.md`
+
 ## 0.1.3 — 2026-08-27
 
 - `get_filing_text`: download a public attachment and return extracted plain text (PDF/DOCX/text) so agents can summarize filings without filesystem access

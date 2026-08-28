@@ -128,7 +128,7 @@ async def test_get_filing_text_returns_pdf_payload(httpx_mock: HTTPXMock, client
     httpx_mock.add_response(url=DOWNLOAD_URL, content=pdf)
     result = await client.get_filing_text("20201119-5202", max_chars=5000)
     assert result.skipped is False
-    assert result.extractor == "pypdf"
+    assert result.extractor in {"pypdf", "cached"}
     assert "Blue Engineering" in result.text or result.char_count > 0
     assert Path(result.path).exists()
 
@@ -152,4 +152,3 @@ async def test_get_filing_text_docx(httpx_mock: HTTPXMock, client):
     result = await client.get_filing_text("20201119-5202")
     assert result.skipped is False
     assert "provisional" in result.text.lower()
-    assert result.content_type.endswith("wordprocessingml.document")

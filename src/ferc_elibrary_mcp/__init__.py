@@ -5,6 +5,7 @@ from ferc_elibrary_mcp.exceptions import (
     ELibraryError,
     ELibraryRequestError,
     FilingNotFoundError,
+    RateLimitError,
     RestrictedDocumentError,
 )
 from ferc_elibrary_mcp.models import (
@@ -39,6 +40,7 @@ __all__ = [
     "FilingNotFoundError",
     "FilingSummary",
     "RelatedCollection",
+    "RateLimitError",
     "RestrictedDocumentError",
     "SearchHit",
     "SearchResponse",
