@@ -33,10 +33,11 @@ def test_watchdog_fires_when_idle(monkeypatch):
     )
     tracker = IdleShutdownMiddleware()
     tracker.last_activity = time.monotonic() - 60
-    _start_idle_watchdog(tracker, timeout=1.0)
+    stop = _start_idle_watchdog(tracker, timeout=1.0)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and not fired:
         time.sleep(0.05)
+    stop.set()
     assert fired, "watchdog did not fire on an idle instance"
 
 
@@ -46,11 +47,12 @@ def test_watchdog_holds_off_while_active(monkeypatch):
         "ferc_elibrary_mcp.server.signal.raise_signal", lambda sig: fired.append(sig)
     )
     tracker = IdleShutdownMiddleware()
-    _start_idle_watchdog(tracker, timeout=2.0)
-    deadline = time.monotonic() + 4
+    stop = _start_idle_watchdog(tracker, timeout=2.0)
+    deadline = time.monotonic() + 1.5
     while time.monotonic() < deadline:
         tracker.last_activity = time.monotonic()
         time.sleep(0.1)
+    stop.set()
     assert not fired, "watchdog reaped an instance that was still in use"
 
 

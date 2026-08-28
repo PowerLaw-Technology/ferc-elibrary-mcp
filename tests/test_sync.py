@@ -59,25 +59,16 @@ async def test_sync_docket_incremental(httpx_mock: HTTPXMock, client, tmp_path):
                         "category": "Submittal",
                         "Affiliation_Organization": [],
                     },
-                    {
-                        "accession_no": "20201119-5203",
-                        "doc_desc": "New filing",
-                        "filed_date": "2026-01-02T00:00:00",
-                        "issued_date": "0001-01-01T00:00:00",
-                        "DOCKET_TEXT": "P-15056",
-                        "SUBDOCKET_TEXT": "000",
-                        "category": "Submittal",
-                        "Affiliation_Organization": [],
-                    },
                 ]
             }
         ],
     }
-    pdf = _hand_rolled_pdf("new filing body")
+    pdf = _hand_rolled_pdf("cached body")
     httpx_mock.add_response(url=DOCKET_URL, json=sheet)
     client.store.put("P-15056-000", "20201119-5202", "cached.pdf", pdf)
     result = await client.sync_docket("P-15056-000")
     assert "20201119-5202" in result["already_cached"]
+    assert result["fetched_count"] == 0
 
 
 async def test_token_bucket_limits_rps() -> None:

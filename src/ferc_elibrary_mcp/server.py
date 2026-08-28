@@ -476,23 +476,25 @@ class IdleShutdownMiddleware(Middleware):
         return await call_next(context)
 
 
-def _start_idle_watchdog(tracker: IdleShutdownMiddleware, timeout: float) -> None:
+def _start_idle_watchdog(tracker: IdleShutdownMiddleware, timeout: float) -> threading.Event:
     """Exit if the client stops talking to this instance entirely.
 
     An abandoned instance never sees EOF because the client keeps its stdin
     open, so it cannot notice on its own that nobody is listening. Shutdown
     goes through SIGTERM, which is the same path a clean stop already takes.
+    Returns a stop event so tests can disable the watchdog thread.
     """
+    stop = threading.Event()
 
     def watch() -> None:
         interval = max(1.0, min(60.0, timeout / 4))
-        while True:
-            time.sleep(interval)
+        while not stop.wait(interval):
             if time.monotonic() - tracker.last_activity >= timeout:
                 signal.raise_signal(signal.SIGTERM)
                 return
 
     threading.Thread(target=watch, name="ferc-idle-watchdog", daemon=True).start()
+    return stop
 
 
 def main() -> None:
