@@ -42,38 +42,39 @@ from ferc_elibrary_mcp.models import (
     hit_to_detail,
     hit_to_summary,
 )
-from ferc_elibrary_mcp.textextract import extract_text
+from ferc_elibrary_mcp.ferc.client import FercClient
+from ferc_elibrary_mcp.services.documents import DocumentService, SyncService
+from ferc_elibrary_mcp.store import create_store
+from ferc_elibrary_mcp.store.protocol import DocumentStore
 
 _UNSAFE_NAME = re.compile(r"[^\w.\- ]+", re.UNICODE)
 _ACCESSION_ZIP_PREFIX = re.compile(r"^(\d{8}-\d{4})_(.+)$")
 
 
 class ELibraryClient:
-    """Thin async client for FERC's undocumented eLibrarywebapi."""
+    """Async client for FERC eLibrary with cache-first document storage."""
 
     def __init__(
         self,
         http: httpx.AsyncClient | None = None,
         download_dir: Path | None = None,
         rate_limit_seconds: float | None = None,
+        store: DocumentStore | None = None,
     ) -> None:
+        rps = None if rate_limit_seconds is None else (1.0 / rate_limit_seconds if rate_limit_seconds > 0 else 0.0)
+        self._ferc = FercClient(http=http, rps=rps)
         self._http = http
         self._owns_http = http is None
-        self._download_dir = (
-            Path(download_dir)
-            if download_dir is not None
-            else config.resolve_download_dir()
-        )
-        self._rate_limit = (
-            config.RATE_LIMIT_SECONDS if rate_limit_seconds is None else rate_limit_seconds
-        )
-        self._lock = asyncio.Lock()
-        self._last_request = 0.0
+        root = Path(download_dir) if download_dir is not None else config.resolve_store_root()
+        self._store = store or create_store(root)
+        self._documents = DocumentService(self._store, self)
+        self._sync = SyncService(self._store, self, self._documents)
+        # Legacy alias used by older tests/config.
+        self._download_dir = self._store.root
 
     async def aclose(self) -> None:
-        if self._owns_http and self._http is not None:
-            await self._http.aclose()
-            self._http = None
+        await self._ferc.aclose()
+        self._http = None
 
     async def __aenter__(self) -> ELibraryClient:
         return self
@@ -81,131 +82,28 @@ class ELibraryClient:
     async def __aexit__(self, *exc: object) -> None:
         await self.aclose()
 
+    @property
+    def store(self) -> DocumentStore:
+        return self._store
+
     def _ensure_http(self) -> httpx.AsyncClient:
-        if self._http is None:
-            self._http = httpx.AsyncClient(
-                base_url=config.BASE_URL,
-                headers={
-                    "User-Agent": config.USER_AGENT,
-                    "Accept": "application/json, text/plain, */*",
-                    "Content-Type": "application/json",
-                },
-                timeout=httpx.Timeout(
-                    connect=config.CONNECT_TIMEOUT,
-                    read=config.SEARCH_TIMEOUT,
-                    write=config.CONNECT_TIMEOUT,
-                    pool=config.CONNECT_TIMEOUT,
-                ),
-                follow_redirects=True,
-            )
-        return self._http
+        return self._ferc._ensure_http()
 
-    async def _throttle(self) -> None:
-        if self._rate_limit <= 0:
-            return
-        async with self._lock:
-            wait = self._rate_limit - (time.monotonic() - self._last_request)
-            if wait > 0:
-                await asyncio.sleep(wait)
-            self._last_request = time.monotonic()
+    async def _send(self, *args: Any, **kwargs: Any) -> httpx.Response:
+        return await self._ferc._send(*args, **kwargs)
 
-    async def _send(
-        self,
-        method: str,
-        path: str,
-        *,
-        json: Any = None,
-        content: bytes | str | None = None,
-        params: dict[str, str] | None = None,
-        timeout: float | None = None,
-    ) -> httpx.Response:
-        """Send one request, retrying the proxy errors eLibrary throws at random."""
-        client = self._ensure_http()
-        last_status: int | None = None
-        for attempt in range(config.MAX_RETRIES):
-            await self._throttle()
-            try:
-                response = await client.request(
-                    method,
-                    path,
-                    json=json,
-                    content=content,
-                    params=params,
-                    timeout=timeout,
-                )
-            except httpx.HTTPError as exc:
-                if attempt == config.MAX_RETRIES - 1:
-                    raise ELibraryRequestError(
-                        f"eLibrary request failed: {exc}"
-                    ) from exc
-                await asyncio.sleep(config.RETRY_BACKOFF_SECONDS * (attempt + 1))
-                continue
+    async def _request_json(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._ferc.request_json(*args, **kwargs)
 
-            if response.status_code not in config.RETRY_STATUS_CODES:
-                return response
+    async def _request_bytes(self, *args: Any, **kwargs: Any) -> tuple[bytes, str | None]:
+        body, name, _headers = await self._ferc.request_bytes(*args, **kwargs)
+        return body, name
 
-            last_status = response.status_code
-            if attempt < config.MAX_RETRIES - 1:
-                await asyncio.sleep(config.RETRY_BACKOFF_SECONDS * (attempt + 1))
+    def _select_transmittal(self, filing: FilingDetail, file_id: str | None) -> Transmittal:
+        return _select_transmittal(filing, file_id)
 
-        raise ELibraryRequestError(
-            f"eLibrary returned HTTP {last_status} for {path} after "
-            f"{config.MAX_RETRIES} attempts"
-        )
-
-    async def _request_json(
-        self,
-        method: str,
-        path: str,
-        *,
-        json: Any = None,
-        content: bytes | str | None = None,
-        params: dict[str, str] | None = None,
-        timeout: float | None = None,
-    ) -> Any:
-        response = await self._send(
-            method, path, json=json, content=content, params=params, timeout=timeout
-        )
-
-        if response.status_code >= 400:
-            detail = _ferc_error_detail(response)
-            raise ELibraryRequestError(
-                f"eLibrary returned HTTP {response.status_code} for {path}{detail}"
-            )
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise ELibraryRequestError(
-                f"eLibrary returned non-JSON for {path}: {response.text[:200]}"
-            ) from exc
-        return payload
-
-    async def _request_bytes(
-        self,
-        method: str,
-        path: str,
-        *,
-        json: Any = None,
-        content: bytes | str | None = None,
-        params: dict[str, str] | None = None,
-        timeout: float | None = None,
-    ) -> tuple[bytes, str | None]:
-        """Return the body and the server-suggested filename, if any."""
-        response = await self._send(
-            method,
-            path,
-            json=json,
-            content=content,
-            params=params,
-            timeout=timeout if timeout is not None else config.DOWNLOAD_TIMEOUT,
-        )
-        if response.status_code >= 400:
-            detail = _ferc_error_detail(response)
-            raise ELibraryRequestError(
-                f"eLibrary returned HTTP {response.status_code} for {path}{detail}"
-            )
-        disposition = response.headers.get("content-disposition", "")
-        return response.content, _filename_from_disposition(disposition)
+    def _safe_name(self, name: str) -> str:
+        return _safe_name(name)
 
     async def search(
         self,
@@ -256,7 +154,11 @@ class ELibraryClient:
             raise ELibraryRequestError(
                 parsed.error_message or "eLibrary search returned success=false"
             )
-        return parsed, [hit_to_summary(hit) for hit in parsed.search_hits], dates
+        summaries = [hit_to_summary(hit) for hit in parsed.search_hits]
+        for summary in summaries:
+            docket = summary.docket_numbers[0] if summary.docket_numbers else summary.accession_number
+            summary.__dict__["cached"] = self._store.accession_cached(docket, summary.accession_number)
+        return parsed, summaries, dates
 
     async def get_filing(self, accession_number: str) -> FilingDetail:
         accession_number = accession_number.strip()
@@ -287,7 +189,18 @@ class ELibraryClient:
                 "If it exists it is likely privileged, protected, or CEII and "
                 "cannot be downloaded."
             )
-        return hit_to_detail(hit)
+        detail = hit_to_detail(hit)
+        docket = detail.docket_numbers[0] if detail.docket_numbers else accession_number
+        detail.__dict__["cached"] = self._store.accession_cached(docket, accession_number)
+        for item in detail.files:
+            manifest = self._store.manifest(docket, accession_number)
+            stored = None
+            if manifest:
+                stored = next((f for f in manifest.files if f.filename == item.file_name), None)
+            item.__dict__["cached"] = self._store.exists(docket, accession_number, item.file_name)
+            item.__dict__["page_count"] = stored.page_count if stored else None
+            item.__dict__["extracted_char_count"] = stored.extracted_char_count if stored else None
+        return detail
 
     async def list_files(self, accession_number: str) -> FilingDetail:
         return await self.get_filing(accession_number)
@@ -354,7 +267,7 @@ class ELibraryClient:
         )
         if issued_window:
             dates = dates.model_copy(update={"filtered_client_side": True})
-        return _parse_docket_sheet(
+        sheet = _parse_docket_sheet(
             parent,
             raw,
             page=page,
@@ -363,6 +276,10 @@ class ELibraryClient:
             sort_order=sort_order,
             keep_accessions=keep,
         )
+        for filing in sheet.filings:
+            docket = filing.docket_numbers[0] if filing.docket_numbers else parent
+            filing.__dict__["cached"] = self._store.accession_cached(docket, filing.accession_number)
+        return sheet
 
     async def _accessions_in_issued_window(
         self, docket: str, start: str | None, end: str | None
@@ -395,16 +312,28 @@ class ELibraryClient:
         format: DownloadFormat = "native",
         max_bytes: int = config.MAX_DOWNLOAD_BYTES,
     ) -> DownloadResult:
-        filing = await self.get_filing(accession_number)
+        return await self._documents.ensure_file(
+            accession_number,
+            file_id=file_id,
+            format=format,
+            max_bytes=max_bytes,
+        )
+
+    async def _download_file_to_store(
+        self,
+        filing: FilingDetail,
+        *,
+        docket: str,
+        file_id: str | None = None,
+        format: DownloadFormat = "native",
+        max_bytes: int = config.MAX_DOWNLOAD_BYTES,
+    ) -> DownloadResult:
+        accession_number = filing.accession_number
         if filing.availability.lower() != "public":
             raise RestrictedDocumentError(
                 f"Filing {accession_number} is {filing.availability}; "
                 "only public documents can be downloaded."
             )
-
-        self._download_dir.mkdir(parents=True, exist_ok=True)
-        dest_dir = self._download_dir / _safe_name(accession_number)
-        dest_dir.mkdir(parents=True, exist_ok=True)
 
         if format == "pdf":
             body, suggested = await self._request_bytes(
@@ -414,18 +343,17 @@ class ELibraryClient:
                 content='{serverLocation: ""}',
             )
             filename = _safe_name(suggested or "") or f"{accession_number}.pdf"
-            return self._write_download(
-                dest_dir / filename,
-                body,
+            return self._write_download_to_store(
+                docket,
                 accession_number,
                 filename,
+                body,
                 max_bytes=max_bytes,
                 is_bundle=True,
+                file_id=file_id or "",
             )
 
         if format == "zip":
-            # A non-empty "accession" makes eLibrary zip every file on the
-            # accession instead of serving the one requested.
             body, suggested = await self._request_bytes(
                 "POST",
                 "File/DownloadP8File",
@@ -444,14 +372,15 @@ class ELibraryClient:
                 filename,
                 filing=filing,
             )
-            return self._write_download(
-                dest_dir / filename,
-                body,
+            return self._write_download_to_store(
+                docket,
                 accession_number,
                 filename,
+                body,
                 max_bytes=max_bytes,
                 is_bundle=is_bundle,
                 expected_size=expected_size,
+                file_id=file_id or "",
             )
 
         transmittal = _select_transmittal(filing, file_id)
@@ -487,13 +416,14 @@ class ELibraryClient:
         )
         if "." not in filename and transmittal.file_format:
             filename = f"{filename}.{transmittal.file_format.lower()}"
-        return self._write_download(
-            dest_dir / filename,
-            body,
+        return self._write_download_to_store(
+            docket,
             accession_number,
             filename,
+            body,
             max_bytes=max_bytes,
             expected_size=transmittal.file_size or None,
+            file_id=transmittal.file_id,
         )
 
     async def get_filing_text(
@@ -504,74 +434,108 @@ class ELibraryClient:
         max_chars: int = config.DEFAULT_EXTRACT_CHARS,
         max_bytes: int = config.MAX_EXTRACT_FILE_BYTES,
     ) -> TextExtractionResult:
-        """Download one public attachment and return extracted plain text.
-
-        Use this when an agent needs to read or summarize a filing. download_file
-        only writes a path on disk, which sandboxed / remote clients cannot open.
-        """
-        download = await self.download_file(
-            accession_number,
-            file_id=file_id,
-            format="native",
-            max_bytes=max_bytes,
-        )
-        if download.skipped:
+        filing = await self.get_filing(accession_number)
+        filename = None
+        if file_id:
+            for item in filing.files:
+                if item.file_id == file_id:
+                    filename = item.file_name
+                    break
+        elif filing.files:
+            filename = filing.files[0].file_name
+        if not filename:
             return TextExtractionResult(
                 accession_number=accession_number,
-                file_name=download.file_name,
+                file_name="",
                 file_id=file_id,
-                path=download.path,
-                content_type=download.content_type,
+                path="",
+                content_type="",
                 text="",
                 char_count=0,
                 truncated=False,
                 extractor="none",
-                url=download.url,
+                url=file_list_url(accession_number),
                 skipped=True,
-                skip_reason=download.skip_reason,
+                skip_reason="No file found on accession",
             )
-        if download.is_bundle:
-            return TextExtractionResult(
-                accession_number=accession_number,
-                file_name=download.file_name,
-                file_id=file_id,
-                path=download.path,
-                content_type=download.content_type,
-                text="",
-                char_count=0,
-                truncated=False,
-                extractor="unsupported",
-                url=download.url,
-                skipped=True,
-                skip_reason=(
-                    "Download returned a multi-file archive. Pass file_id for one "
-                    "attachment, or use format=pdf on download_file then extract."
-                ),
-            )
-
-        body = Path(download.path).read_bytes()
-        text, meta = extract_text(
-            body,
-            download.file_name,
-            content_type=download.content_type,
+        read = await self._documents.read_document_for_filing(
+            filing,
+            filename,
             max_chars=max_chars,
         )
-        skipped = bool(meta.get("skip_reason"))
         return TextExtractionResult(
             accession_number=accession_number,
-            file_name=download.file_name,
+            file_name=filename,
             file_id=file_id,
-            path=download.path,
-            content_type=download.content_type,
-            text=text,
-            char_count=int(meta["char_count"]),
-            truncated=bool(meta["truncated"]),
-            page_count=meta.get("page_count") if isinstance(meta.get("page_count"), int) else None,
-            extractor=str(meta["extractor"]),
-            url=download.url,
-            skipped=skipped,
-            skip_reason=meta.get("skip_reason") if isinstance(meta.get("skip_reason"), str) else None,
+            path=read.get("path", ""),
+            content_type="",
+            text=read.get("text", ""),
+            char_count=int(read.get("char_count", 0)),
+            truncated=bool(read.get("truncated")),
+            page_count=read.get("page_count"),
+            extractor=str(read.get("extractor", "read_document")),
+            url=file_list_url(accession_number),
+            skipped=False,
+            skip_reason=(
+                f"Deprecated: use read_document. Total chars: {read.get('total_chars')}. "
+                f"Hint: Use get_document_outline or search_within_document, then read_document "
+                f"with pages/char_range."
+                if read.get("truncated")
+                else "Deprecated: use read_document instead."
+            ),
         )
+
+    async def read_document(
+        self,
+        accession_number: str,
+        filename: str,
+        *,
+        pages: list[int] | None = None,
+        char_start: int | None = None,
+        char_end: int | None = None,
+        max_chars: int | None = None,
+    ) -> dict[str, Any]:
+        return await self._documents.read_document(
+            accession_number,
+            filename,
+            pages=pages,
+            char_start=char_start,
+            char_end=char_end,
+            max_chars=max_chars,
+        )
+
+    async def search_within_document(
+        self,
+        accession_number: str,
+        filename: str,
+        query: str,
+        *,
+        max_hits: int = 10,
+    ) -> dict[str, Any]:
+        return await self._documents.search_within_document(
+            accession_number,
+            filename,
+            query,
+            max_hits=max_hits,
+        )
+
+    async def get_document_outline(
+        self,
+        accession_number: str,
+        filename: str,
+    ) -> dict[str, Any]:
+        return await self._documents.get_document_outline(accession_number, filename)
+
+    async def sync_docket(self, docket_number: str) -> dict[str, Any]:
+        return await self._sync.sync_docket(docket_number)
+
+    def cache_status(
+        self,
+        *,
+        docket: str | None = None,
+        accession: str | None = None,
+    ) -> dict[str, Any]:
+        return self._store.cache_status(docket=docket, accession=accession).model_dump()
 
     async def download_bundle(
         self,
@@ -794,6 +758,55 @@ class ELibraryClient:
             if page * config.MAX_SEARCH_LIMIT >= parsed.total_hits:
                 break
             page += 1
+
+    def _write_download_to_store(
+        self,
+        docket: str,
+        accession_number: str,
+        file_name: str,
+        body: bytes,
+        *,
+        max_bytes: int,
+        is_bundle: bool = False,
+        expected_size: int | None = None,
+        file_id: str = "",
+    ) -> DownloadResult:
+        content_type = guess_content_type(body, file_name)
+        bundle = is_bundle or content_type == "application/zip"
+        if len(body) > max_bytes:
+            return DownloadResult(
+                accession_number=accession_number,
+                path="",
+                size=len(body),
+                content_type=content_type,
+                file_name=file_name,
+                url=file_list_url(accession_number),
+                is_bundle=bundle,
+                expected_size=expected_size,
+                skipped=True,
+                skip_reason=f"Downloaded payload is {len(body)} bytes, over the {max_bytes} byte cap",
+            )
+        path = self._store.put(
+            docket,
+            accession_number,
+            file_name,
+            body,
+            file_id=file_id,
+            content_type=content_type,
+        )
+        return DownloadResult(
+            accession_number=accession_number,
+            path=str(path.resolve()),
+            size=len(body),
+            content_type=content_type,
+            file_name=file_name,
+            url=file_list_url(accession_number),
+            is_bundle=bundle,
+            expected_size=expected_size,
+            size_matches_metadata=(
+                None if expected_size is None else len(body) == expected_size
+            ),
+        )
 
     def _write_download(
         self,

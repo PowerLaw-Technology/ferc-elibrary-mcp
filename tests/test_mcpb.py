@@ -61,10 +61,11 @@ def test_mcp_config_wires_download_dir_and_idle_timeout() -> None:
         "ferc-elibrary-mcp",
     ]
     assert config["env"]["FERC_DOWNLOAD_DIR"] == "${user_config.download_dir}"
+    assert config["env"]["FERC_STORE_ROOT"] == "${user_config.download_dir}"
     assert config["env"]["FERC_MCP_IDLE_TIMEOUT_SECONDS"] == "14400"
     download = _manifest()["user_config"]["download_dir"]
     assert download["type"] == "directory"
-    assert download["default"] == "${HOME}/Downloads/ferc-elibrary"
+    assert download["title"] == "Store root"
 
 
 async def test_manifest_tools_match_server() -> None:

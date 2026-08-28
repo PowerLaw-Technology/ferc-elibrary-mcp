@@ -6,13 +6,25 @@ from pathlib import Path
 
 BASE_URL = "https://elibrary.ferc.gov/eLibrarywebapi/api/"
 ELIBRARY_UI_BASE = "https://elibrary.ferc.gov/eLibrary"
-USER_AGENT = "ferc-elibrary-mcp/0.1.3 (public eLibrary research)"
+USER_AGENT = "ferc-elibrary-mcp/0.2.0 (public eLibrary research)"
 
 SEARCH_TIMEOUT = 30.0
 DOWNLOAD_TIMEOUT = 120.0
 CONNECT_TIMEOUT = 10.0
 
-RATE_LIMIT_SECONDS = float(os.environ.get("FERC_RATE_LIMIT_SECONDS", "0.5"))
+def _rate_limit_rps() -> float:
+    if "FERC_RATE_LIMIT_RPS" in os.environ:
+        return float(os.environ["FERC_RATE_LIMIT_RPS"])
+    if "FERC_RATE_LIMIT_SECONDS" in os.environ:
+        seconds = float(os.environ["FERC_RATE_LIMIT_SECONDS"])
+        return 1.0 / seconds if seconds > 0 else 0.0
+    return 0.5
+
+
+RATE_LIMIT_RPS = _rate_limit_rps()
+RATE_LIMIT_BURST = int(os.environ.get("FERC_RATE_LIMIT_BURST", "2"))
+# Deprecated alias kept for tests and older configs.
+RATE_LIMIT_SECONDS = 1.0 / RATE_LIMIT_RPS if RATE_LIMIT_RPS > 0 else 0.0
 
 # eLibrary sits behind a proxy that intermittently returns 502/503/520.
 RETRY_STATUS_CODES = frozenset({500, 502, 503, 504, 520, 521, 522, 524})
@@ -61,6 +73,17 @@ def resolve_download_dir(raw: str | None = None) -> Path:
 
 DEFAULT_DOWNLOAD_DIR = Path.home() / "Downloads" / "ferc-elibrary"
 
+
+def resolve_store_root(raw: str | None = None) -> Path:
+    """Return the document store root, preferring FERC_STORE_ROOT over legacy env."""
+    if raw is None:
+        raw = os.environ.get("FERC_STORE_ROOT") or os.environ.get("FERC_DOWNLOAD_DIR", "")
+    return resolve_download_dir(raw)
+
+
+STORE_BACKEND = os.environ.get("FERC_STORE_BACKEND", "local").strip().lower() or "local"
+DEFAULT_STORE_ROOT = DEFAULT_DOWNLOAD_DIR
+
 DEFAULT_SEARCH_LIMIT = 25
 MAX_SEARCH_LIMIT = 100
 DESCRIPTION_MAX_LEN = 500
@@ -104,9 +127,21 @@ COLLECT_MAX_FILINGS_PER_DOCKET = 50
 COLLECT_MAX_DOWNLOADS = 10
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 
-# Text returned through MCP tool responses (agents cannot open local paths).
-DEFAULT_EXTRACT_CHARS = int(os.environ.get("FERC_DEFAULT_EXTRACT_CHARS", "20000"))
-MAX_EXTRACT_CHARS = int(os.environ.get("FERC_MAX_EXTRACT_CHARS", "100000"))
+# Bounded text returned through MCP read tools.
+MAX_READ_CHARS = int(os.environ.get("FERC_MAX_READ_CHARS", "25000"))
+# Deprecated aliases kept for backward compatibility.
+DEFAULT_EXTRACT_CHARS = int(
+    os.environ.get("FERC_DEFAULT_EXTRACT_CHARS", str(MAX_READ_CHARS))
+)
+MAX_EXTRACT_CHARS = int(
+    os.environ.get("FERC_MAX_EXTRACT_CHARS", str(max(MAX_READ_CHARS, 100000)))
+)
+ENABLE_OCR = os.environ.get("FERC_ENABLE_OCR", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 MAX_EXTRACT_FILE_BYTES = int(
     os.environ.get("FERC_MAX_EXTRACT_FILE_BYTES", str(15 * 1024 * 1024))
 )

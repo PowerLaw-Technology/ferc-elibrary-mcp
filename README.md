@@ -80,20 +80,39 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Downloads go under `FERC_DOWNLOAD_DIR` (default `~/Downloads/ferc-elibrary`). Optional: set `FERC_RATE_LIMIT_SECONDS` (default `0.5`).
+Downloads and extracted text are stored under `FERC_STORE_ROOT` (default `~/Downloads/ferc-elibrary`). `FERC_DOWNLOAD_DIR` is a legacy alias. Rate limit: `FERC_RATE_LIMIT_RPS` (default `0.5`, burst `2`).
 
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
-| `search_filings` | Keyword, docket, accession, document type, category, and industry search. Public filings only. See [Date filtering](#date-filtering) for how the date window is chosen. |
-| `get_docket` | Docket sheet: related filings, applicants, accession numbers. See [Docket sheets vs search](#docket-sheets-vs-search) for how it differs from `search_filings`. |
-| `get_filing` | Metadata for one accession (`YYYYMMDD-NNNN`). |
-| `list_files` | Files attached to an accession (call before downloading). |
-| `get_filing_text` | Download one public attachment and **return extracted plain text** (PDF/DOCX/text). Use this to read or summarize filings — `download_file` only writes a local path. |
-| `download_file` | Save a **public** single file, one-accession zip, or generated PDF under `FERC_DOWNLOAD_DIR`. Does not return bytes. |
-| `download_bundle` | **Preferred for bulk:** Zip & Download many public files across accessions in one request into `FERC_DOWNLOAD_DIR/bundles`, with per-accession folders. |
-| `collect_related` | Search a term or document type, then group related filings by docket (capped at 10 dockets × 50 filings). Optional `download` uses `download_bundle` (up to 10 files). |
+| `search_filings` | Keyword, docket, accession, document type, category, and industry search. Includes `cached` per hit. |
+| `get_docket` | Docket sheet with `cached` per accession. |
+| `get_filing` / `list_files` | Metadata for one accession, including cache and extraction stats. |
+| `sync_docket` | Incrementally fetch accessions missing from the store. |
+| `cache_status` | Inspect what the store holds. |
+| `read_document` | **Bounded** plain text from a cached attachment (pages or char range). |
+| `search_within_document` | Find passages with page/char offsets. |
+| `get_document_outline` | PDF bookmarks or heuristic section map. |
+| `get_filing_text` | **Deprecated** bounded alias for `read_document`. |
+| `download_file` | Cache a public file to the store (never returns text). |
+| `download_bundle` | Zip & Download many public files; only cache misses hit FERC. |
+| `collect_related` | Search and group related filings by docket. |
+
+See [`skills/ferc-elibrary/SKILL.md`](skills/ferc-elibrary/SKILL.md) for the recommended large-document workflow.
+
+## Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FERC_STORE_BACKEND` | `local` | Store backend (`local`; `s3` in Phase 2) |
+| `FERC_STORE_ROOT` | `~/Downloads/ferc-elibrary` | Document store root (shared folder or S3 prefix) |
+| `FERC_DOWNLOAD_DIR` | same as above | Legacy alias for store root |
+| `FERC_RATE_LIMIT_RPS` | `0.5` | Token-bucket requests per second |
+| `FERC_RATE_LIMIT_BURST` | `2` | Burst capacity |
+| `FERC_MAX_READ_CHARS` | `25000` | Per-call text cap for `read_document` |
+| `FERC_ENABLE_OCR` | `false` | Opt-in OCR for scanned PDFs (not yet implemented) |
+| `FERC_MCP_TRANSPORT` | `stdio` | MCP transport (`stdio` now; `http` in Phase 3) |
 
 Privileged, protected, and CEII documents are refused.
 
